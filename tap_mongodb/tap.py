@@ -1,15 +1,16 @@
 """MongoDB tap class."""
+
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path, PurePath
+from typing import Any
 
-import orjson
 import genson
+import orjson
 import singer_sdk._singerlib.messages
 import singer_sdk.helpers._typing
-from pathlib import PurePath, Path
-from typing import Any
 import yaml
 from pymongo.mongo_client import MongoClient
 from singer_sdk import Stream, Tap
@@ -36,15 +37,51 @@ def noop(*args, **kwargs) -> None:
 singer_sdk.helpers._typing._warn_unmapped_properties = noop
 
 
-def recursively_drop_required(schema: dict) -> None:
-    """Recursively drop the required property from a schema.
-
-    This is used to clean up genson generated schemas which are strict by default."""
+def recursively_drop_required(schema: dict) -> dict:
+    """Recursively drop the required property from a schema."""
     schema.pop("required", None)
     if "properties" in schema:
         for prop in schema["properties"]:
             if schema["properties"][prop].get("type") == "object":
-                recursively_drop_required(schema["properties"][prop])
+                schema["properties"][prop] = recursively_drop_required(schema["properties"][prop])
+    return schema
+
+
+def recursively_drop_null_types(schema: dict) -> dict:
+    """Recursively drop null types from a schema.
+
+    This is used to clean up genson generated schemas which may include null types."""
+    if "properties" in schema:
+        for prop in list(schema["properties"]):
+            prop_schema = schema["properties"][prop]
+            if "type" in prop_schema:
+                if isinstance(prop_schema["type"], list):
+                    prop_schema["type"] = [t for t in prop_schema["type"] if t != "null"]
+                    if len(prop_schema["type"]) == 1:
+                        prop_schema["type"] = prop_schema["type"][0]
+                elif prop_schema["type"] == "null":
+                    del schema["properties"][prop]
+            if prop_schema.get("type") == "object":
+                schema["properties"][prop] = recursively_drop_null_types(prop_schema)
+            elif prop_schema.get("type") == "array" and "items" in prop_schema:
+                if isinstance(prop_schema["items"], dict):
+                    prop_schema["items"] = recursively_drop_null_types(prop_schema["items"])
+    return schema
+
+
+def infer_and_clean_schema(builder: genson.SchemaBuilder) -> dict:
+    """Infer schema from builder and clean it by dropping required and null types.
+
+    Args:
+        builder: The Genson schema builder.
+
+    Returns:
+        A cleaned schema dictionary.
+    """
+    schema = builder.to_schema()
+    schema = recursively_drop_required(schema)
+    schema = recursively_drop_null_types(schema)
+    return schema
 
 
 class TapMongoDB(Tap):
@@ -65,9 +102,7 @@ class TapMongoDB(Tap):
         th.Property(
             "mongo_file_location",
             th.StringType,
-            description=(
-                "Optional file path, useful if reading mongo configuration from a file."
-            ),
+            description=("Optional file path, useful if reading mongo configuration from a file."),
             default=_BLANK,
         ),
         th.Property(
@@ -93,18 +128,12 @@ class TapMongoDB(Tap):
         th.Property(
             "database_includes",
             th.ArrayType(th.StringType),
-            description=(
-                "A list of databases to include. If this list is empty, all databases"
-                " will be included."
-            ),
+            description=("A list of databases to include. If this list is empty, all databases" " will be included."),
         ),
         th.Property(
             "database_excludes",
             th.ArrayType(th.StringType),
-            description=(
-                "A list of databases to exclude. If this list is empty, no databases"
-                " will be excluded."
-            ),
+            description=("A list of databases to exclude. If this list is empty, no databases" " will be excluded."),
         ),
         th.Property(
             "strategy",
@@ -143,9 +172,7 @@ class TapMongoDB(Tap):
                     with open(mongo_file_location) as f:
                         return yaml.safe_load(f)
                 except ValueError:
-                    self.logger.critical(
-                        f"The YAML mongo_file_location '{mongo_file_location}' has errors"
-                    )
+                    self.logger.critical(f"The YAML mongo_file_location '{mongo_file_location}' has errors")
                     sys.exit(1)
 
         return self.config["mongo"]
@@ -201,10 +228,7 @@ class TapMongoDB(Tap):
                     # https://docs.mongodb.com/manual/core/security-users/#database-user-privileges
                     # TODO: vet the list of exceptions that can be raised here to be more explicit
                     self.logger.debug(
-                        (
-                            "Skipping collections %s, authenticated user does not have permission"
-                            " to access"
-                        ),
+                        ("Skipping collections %s, authenticated user does not have permission" " to access"),
                         db_name,
                     )
                     continue
@@ -229,8 +253,7 @@ class TapMongoDB(Tap):
                                 ).decode("utf-8")
                             )
                         )
-                    schema = builder.to_schema()
-                    recursively_drop_required(schema)
+                    schema = infer_and_clean_schema(builder)
                     if not schema:
                         # If the schema is empty, skip the stream
                         # this errs on the side of strictness
@@ -267,9 +290,7 @@ class TapMongoDB(Tap):
                     raise RuntimeError(f"Unknown strategy {strategy}")
                 entry.schema = entry.schema.from_dict(schema)
                 entry.key_properties = ["_id"]
-                entry.metadata = entry.metadata.get_standard_metadata(
-                    schema=schema, key_properties=["_id"]
-                )
+                entry.metadata = entry.metadata.get_standard_metadata(schema=schema, key_properties=["_id"])
                 entry.database = db_name
                 entry.table = collection
                 catalog.add_stream(entry)
