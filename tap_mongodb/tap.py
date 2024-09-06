@@ -369,5 +369,6 @@ class TapMongoDB(Tap):
             yield stream
 
 
-if __name__ == "__main__":
-    TapMongoDB.cli()
+# Use this to run the tap locally
+# if __name__ == "__main__":
+#     TapMongoDB.cli()
