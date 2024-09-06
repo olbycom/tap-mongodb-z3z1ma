@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import datetime
 import json
 import os
 from typing import Any, Generator, Iterable, MutableMapping
@@ -126,10 +127,20 @@ class CollectionStream(Stream):
         for record in self._collection.find({self.replication_key: {"$gt": bookmark}} if bookmark else {}):
             if self._strategy == "envelope":
                 # Return the record wrapped in a document key
-                yield {"_id": record["_id"], "document": json.dumps(record)}
+                yield {"_id": record["_id"], "document": record}
+            elif self._strategy == "nekt":
+                yield {"_id": record["_id"], "document": json.dumps(record, default=self._handle_unusual_types)}
             else:
                 # Return the record as is
                 yield record
+
+    def _handle_unusual_types(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        elif isinstance(obj, ObjectId):
+            return str(obj)
+        else:
+            return str(obj)
 
     def _generate_record_messages(
         self,

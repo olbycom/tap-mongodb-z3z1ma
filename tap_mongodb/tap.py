@@ -154,10 +154,11 @@ class TapMongoDB(Tap):
                 " as-is leaving the target to respect it. Useful for blob or jsonl. The 'envelope'"
                 " strategy will envelope the document under a key named `document`. The target"
                 " should use a variant type for this key. The 'infer' strategy will infer the"
-                " schema from the data based on a configurable number of documents."
+                " schema from the data based on a configurable number of documents. The 'nekt'"
+                " strategy will serialize the document into a string under a key named `document`.'"
             ),
             default="raw",
-            allowed_values=["raw", "envelope", "infer"],
+            allowed_values=["raw", "envelope", "infer", "nekt"],
         ),
         th.Property(
             "infer_schema_max_docs",
@@ -278,7 +279,8 @@ class TapMongoDB(Tap):
                                 "description": "The document's _id",
                             },
                             "document": {
-                                "type": "string",
+                                "type": "dict",
+                                "additionalProperties": True,
                                 "description": "The document from the collection",
                             },
                         },
@@ -292,6 +294,21 @@ class TapMongoDB(Tap):
                             "_id": {
                                 "type": ["string", "null"],
                                 "description": "The document's _id",
+                            },
+                        },
+                    }
+                elif strategy == "nekt":
+                    schema = {
+                        "type": "object",
+                        "description": "The document from the collection",
+                        "properties": {
+                            "_id": {
+                                "type": ["string", "null"],
+                                "description": "The document's _id",
+                            },
+                            "document": {
+                                "type": ["string", "null"],
+                                "description": "The serialized document",
                             },
                         },
                     }
@@ -350,3 +367,7 @@ class TapMongoDB(Tap):
             )
             stream.apply_catalog(self.catalog)
             yield stream
+
+
+if __name__ == "__main__":
+    TapMongoDB.cli()
