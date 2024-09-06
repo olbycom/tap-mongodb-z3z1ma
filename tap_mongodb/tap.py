@@ -51,22 +51,32 @@ def recursively_drop_null_types(schema: dict) -> dict:
     """Recursively drop null types from a schema.
 
     This is used to clean up genson generated schemas which may include null types."""
-    if "properties" in schema:
-        for prop in list(schema["properties"]):
-            prop_schema = schema["properties"][prop]
-            if "type" in prop_schema:
-                if isinstance(prop_schema["type"], list):
-                    prop_schema["type"] = [t for t in prop_schema["type"] if t != "null"]
-                    if len(prop_schema["type"]) == 1:
-                        prop_schema["type"] = prop_schema["type"][0]
-                elif prop_schema["type"] == "null":
-                    del schema["properties"][prop]
-            if prop_schema.get("type") == "object":
-                schema["properties"][prop] = recursively_drop_null_types(prop_schema)
-            elif prop_schema.get("type") == "array" and "items" in prop_schema:
-                if isinstance(prop_schema["items"], dict):
-                    prop_schema["items"] = recursively_drop_null_types(prop_schema["items"])
-    return schema
+
+    def process_node(node):
+        if isinstance(node, dict):
+            if "type" in node:
+                if isinstance(node["type"], list):
+                    # Only keep the type if removing null would leave other types
+                    if len(node["type"]) == 1 and node["type"][0] == "null":
+                        return None
+                elif node["type"] == "null":
+                    return None
+
+            for key, value in list(node.items()):
+                if isinstance(value, dict):
+                    result = process_node(value)
+                    if result is None:
+                        del node[key]
+                    else:
+                        node[key] = result
+                elif isinstance(value, list):
+                    result = [process_node(item) for item in value]
+                    node[key] = [item for item in result if item is not None]
+            if not node:
+                return None
+        return node
+
+    return process_node(schema) if schema else {}
 
 
 def infer_and_clean_schema(builder: genson.SchemaBuilder) -> dict:
