@@ -152,13 +152,12 @@ class TapMongoDB(Tap):
                 "The strategy to use for schema resolution. Defaults to 'raw'. The 'raw' strategy"
                 " uses a relaxed schema using additionalProperties: true to accept the document"
                 " as-is leaving the target to respect it. Useful for blob or jsonl. The 'envelope'"
-                " strategy will envelope the document under a key named `document`. The target"
+                " strategy will serialize the document under a key named `document`. The target"
                 " should use a variant type for this key. The 'infer' strategy will infer the"
-                " schema from the data based on a configurable number of documents. The 'nekt'"
-                " strategy will serialize the document into a string under a key named `document`.'"
+                " schema from the data based on a configurable number of documents."
             ),
             default="raw",
-            allowed_values=["raw", "envelope", "infer", "nekt"],
+            allowed_values=["raw", "envelope", "infer"],
         ),
         th.Property(
             "infer_schema_max_docs",
@@ -273,15 +272,15 @@ class TapMongoDB(Tap):
                 elif strategy == "envelope":
                     schema = {
                         "type": "object",
+                        "description": "The document from the collection",
                         "properties": {
                             "_id": {
                                 "type": ["string", "null"],
                                 "description": "The document's _id",
                             },
                             "document": {
-                                "type": "object",
-                                "additionalProperties": True,
-                                "description": "The document from the collection",
+                                "type": ["string", "null"],
+                                "description": "The serialized document",
                             },
                         },
                     }
@@ -294,21 +293,6 @@ class TapMongoDB(Tap):
                             "_id": {
                                 "type": ["string", "null"],
                                 "description": "The document's _id",
-                            },
-                        },
-                    }
-                elif strategy == "nekt":
-                    schema = {
-                        "type": "object",
-                        "description": "The document from the collection",
-                        "properties": {
-                            "_id": {
-                                "type": ["string", "null"],
-                                "description": "The document's _id",
-                            },
-                            "document": {
-                                "type": ["string", "null"],
-                                "description": "The serialized document",
                             },
                         },
                     }
