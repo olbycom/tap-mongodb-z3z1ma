@@ -1,7 +1,9 @@
 """MongoDB tap class."""
+
 from __future__ import annotations
 
 import collections
+import json
 import os
 from typing import Any, Generator, Iterable, MutableMapping
 
@@ -52,11 +54,11 @@ def _flatten_record(
                     new_key,
                     # Override the default json encoder to use orjson
                     # and a string encoder for ObjectIds, etc.
-                    orjson.dumps(
-                        v, default=lambda o: str(o), option=orjson.OPT_OMIT_MICROSECONDS
-                    ).decode("utf-8")
-                    if singer_sdk.helpers._flattening._should_jsondump_value(k, v, flattened_schema)
-                    else v,
+                    (
+                        orjson.dumps(v, default=lambda o: str(o), option=orjson.OPT_OMIT_MICROSECONDS).decode("utf-8")
+                        if singer_sdk.helpers._flattening._should_jsondump_value(k, v, flattened_schema)
+                        else v
+                    ),
                 )
             )
     return dict(items)
@@ -102,9 +104,7 @@ class CollectionStream(Stream):
         The idea here is to use change streams but there are nuances that don't fit a batch use
         case such as the fact it is a capped collection."""
         rt = b"\x82"
-        rt += oplog_doc["ts"].time.to_bytes(4, byteorder="big") + oplog_doc["ts"].inc.to_bytes(
-            4, byteorder="big"
-        )
+        rt += oplog_doc["ts"].time.to_bytes(4, byteorder="big") + oplog_doc["ts"].inc.to_bytes(4, byteorder="big")
         rt += b"\x46\x64\x5f\x69\x64\x00\x64"
         rt += bytes.fromhex(str(oplog_doc["o"]["_id"]))
         rt += b"\x00\x5a\x10\x04"
@@ -118,19 +118,15 @@ class CollectionStream(Stream):
 
         The idea here is to use change streams but there are nuances that don't fit a batch use
         case such as the fact it is a capped collection."""
-        first_record: ObjectId = list(self._collection.find(projection=[]).sort("_id", 1).limit(1))[
-            0
-        ]["_id"]
+        first_record: ObjectId = list(self._collection.find(projection=[]).sort("_id", 1).limit(1))[0]["_id"]
         return Timestamp(first_record.generation_time, first_record._inc)
 
     def get_records(self, context: dict | None) -> Iterable[dict]:
         bookmark = self.get_starting_replication_key_value(context)
-        for record in self._collection.find(
-            {self.replication_key: {"$gt": bookmark}} if bookmark else {}
-        ):
+        for record in self._collection.find({self.replication_key: {"$gt": bookmark}} if bookmark else {}):
             if self._strategy == "envelope":
                 # Return the record wrapped in a document key
-                yield {"_id": record["_id"], "document": record}
+                yield {"_id": record["_id"], "document": json.dumps(record)}
             else:
                 # Return the record as is
                 yield record
@@ -150,9 +146,7 @@ class CollectionStream(Stream):
                 )
                 yield record_message
 
-    def _increment_stream_state(
-        self, latest_record: dict[str, Any], *, context: dict | None = None
-    ) -> None:
+    def _increment_stream_state(self, latest_record: dict[str, Any], *, context: dict | None = None) -> None:
         """This override adds error handling for replication key incrementing.
 
         This is useful since a single bad document could otherwise break the stream."""
@@ -182,9 +176,7 @@ class CollectionStream(Stream):
                     if self.config.get("optional_replication_key", False):
                         self.logger.warn("Failed to increment state. Ignoring...")
                         return
-                    raise RuntimeError(
-                        "Failed to increment state. Got record %s", latest_record
-                    ) from e
+                    raise RuntimeError("Failed to increment state. Got record %s", latest_record) from e
 
 
 class MockCollection:

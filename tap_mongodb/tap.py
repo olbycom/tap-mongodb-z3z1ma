@@ -278,8 +278,7 @@ class TapMongoDB(Tap):
                                 "description": "The document's _id",
                             },
                             "document": {
-                                "type": "object",
-                                "additionalProperties": True,
+                                "type": "string",
                                 "description": "The document from the collection",
                             },
                         },
