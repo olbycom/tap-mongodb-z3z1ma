@@ -25,14 +25,14 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = "<3.12,>=3.7.1"
+python = "<3.12,>=3.9"
 requests = ">=2.25.1"
 singer-sdk = ">=0.17.0"
 pymongo = { version = ">=4.3.3", extras = ["srv"] }
 orjson = ">=3.8.2"
 genson = "^1.2.2"
 pyyaml = "^6.0"
-
+custom-logger = {git = "https://github.com/olbycom/nekt-custom-logger-module.git", rev = "v0.0.7"}
 [tool.poetry.dev-dependencies]
 pytest = ">=6.2.5"
 tox = ">=3.24.4"

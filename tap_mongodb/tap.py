@@ -12,6 +12,7 @@ import orjson
 import singer_sdk._singerlib.messages
 import singer_sdk.helpers._typing
 import yaml
+from custom_logger import internal_logger, user_logger
 from pymongo.mongo_client import MongoClient
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
@@ -182,7 +183,7 @@ class TapMongoDB(Tap):
                     with open(mongo_file_location) as f:
                         return yaml.safe_load(f)
                 except ValueError:
-                    self.logger.critical(f"The YAML mongo_file_location '{mongo_file_location}' has errors")
+                    internal_logger.critical(f"The YAML mongo_file_location '{mongo_file_location}' has errors")
                     sys.exit(1)
 
         return self.config["mongo"]
@@ -224,7 +225,7 @@ class TapMongoDB(Tap):
                 # This is a common case when using a shared cluster
                 # https://docs.mongodb.com/manual/core/security-users/#database-user-privileges
                 # TODO: vet the list of exceptions that can be raised here to be more explicit
-                self.logger.debug(
+                user_logger.debug(
                     "Skipping database %s, authenticated user does not have permission to access",
                     db_name,
                 )
@@ -237,12 +238,12 @@ class TapMongoDB(Tap):
                     # This is a common case when using a shared cluster
                     # https://docs.mongodb.com/manual/core/security-users/#database-user-privileges
                     # TODO: vet the list of exceptions that can be raised here to be more explicit
-                    self.logger.debug(
+                    user_logger.debug(
                         ("Skipping collections %s, authenticated user does not have permission" " to access"),
                         db_name,
                     )
                     continue
-                self.logger.info("Discovered collection %s.%s", db_name, collection)
+                user_logger.info("Discovered collection %s.%s", db_name, collection)
                 stream_prefix = self.config.get("stream_prefix", _BLANK)
                 stream_prefix += db_name.replace("-", "_").replace(".", "_")
                 stream_name = f"{stream_prefix}_{collection}"
@@ -268,7 +269,7 @@ class TapMongoDB(Tap):
                         # If the schema is empty, skip the stream
                         # this errs on the side of strictness
                         continue
-                    self.logger.info("Inferred schema: %s", schema)
+                    internal_logger.info("Inferred schema: %s", schema)
                 elif strategy == "envelope":
                     schema = {
                         "type": "object",
