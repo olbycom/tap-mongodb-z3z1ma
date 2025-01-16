@@ -1,0 +1,6 @@
+{
+  "name": "tap-mongodb",
+  "variant": "z3z1ma",
+  "pip_url": "git+https://github.com/olbycom/tap-mongodb-z3z1ma.git",
+  "capabilities": ["state", "catalog", "discover"]
+}
