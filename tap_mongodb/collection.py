@@ -13,6 +13,7 @@ import singer_sdk._singerlib as singer
 import singer_sdk.helpers._flattening
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
+from custom_logger import user_logger
 from pymongo.collection import Collection
 from singer_sdk import Stream
 from singer_sdk.helpers._state import increment_state
@@ -123,14 +124,29 @@ class CollectionStream(Stream):
         return Timestamp(first_record.generation_time, first_record._inc)
 
     def get_records(self, context: dict | None) -> Iterable[dict]:
+        user_logger.info(f"Using batch size of {self.config.get('batch_size', 1000)} records.")
+        user_logger.info(f"Cursor timeout is set to {self.config.get('no_cursor_timeout', False)}")
+        user_logger.info(f"Starting data extraction..")
         bookmark = self.get_starting_replication_key_value(context)
-        for record in self._collection.find({self.replication_key: {"$gt": bookmark}} if bookmark else {}):
-            if self._strategy == "envelope":
-                # Return the record wrapped in a document key
-                yield {"_id": record["_id"], "document": json.dumps(record, default=self._handle_unusual_types)}
+        cursor = self._collection.find(
+            {self.replication_key: {"$gt": bookmark}} if bookmark else {},
+            no_cursor_timeout=self.config.get("no_cursor_timeout", False),
+            batch_size=self.config.get("batch_size", 1000),
+        )
+
+        try:
+            for record in cursor:
+                if self._strategy == "envelope":
+                    # Return the record wrapped in a document key
+                    yield {"_id": record["_id"], "document": json.dumps(record, default=self._handle_unusual_types)}
             else:
                 # Return the record as is
                 yield record
+        except Exception as e:
+            self.logger.error(f"Error fetching records: {e}")
+            raise e
+        finally:
+            cursor.close()
 
     def _handle_unusual_types(self, obj):
         if isinstance(obj, datetime.datetime):

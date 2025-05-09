@@ -169,6 +169,18 @@ class TapMongoDB(Tap):
             ),
             default=2_000,
         ),
+        th.Property(
+            "no_cursor_timeout",
+            th.BooleanType,
+            description="If true, the cursor will not timeout.",
+            default=False,
+        ),
+        th.Property(
+            "batch_size",
+            th.IntegerType,
+            description="The number of documents to fetch in a single batch.",
+            default=1000,
+        ),
         th.Property("stream_maps", th.ObjectType()),
         th.Property("stream_map_config", th.ObjectType()),
         th.Property("batch_config", th.ObjectType()),
