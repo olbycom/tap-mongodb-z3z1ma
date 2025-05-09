@@ -128,11 +128,17 @@ class CollectionStream(Stream):
         user_logger.info(f"Cursor timeout is set to {self.config.get('no_cursor_timeout', False)}")
         user_logger.info(f"Starting data extraction..")
         bookmark = self.get_starting_replication_key_value(context)
-        cursor = self._collection.find(
-            {self.replication_key: {"$gt": bookmark}} if bookmark else {},
-            no_cursor_timeout=self.config.get("no_cursor_timeout", False),
-            batch_size=self.config.get("batch_size", 1000),
-        )
+        if self.config.get("batch_size"):
+            cursor = self._collection.find(
+                {self.replication_key: {"$gt": bookmark}} if bookmark else {},
+                no_cursor_timeout=self.config.get("no_cursor_timeout", False),
+                batch_size=self.config.get("batch_size", 1000),
+            )
+        else:
+            cursor = self._collection.find(
+                {self.replication_key: {"$gt": bookmark}} if bookmark else {},
+                no_cursor_timeout=self.config.get("no_cursor_timeout", False),
+            )
 
         try:
             for record in cursor:

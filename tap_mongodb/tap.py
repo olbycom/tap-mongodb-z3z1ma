@@ -179,7 +179,6 @@ class TapMongoDB(Tap):
             "batch_size",
             th.IntegerType,
             description="The number of documents to fetch in a single batch.",
-            default=1000,
         ),
         th.Property("stream_maps", th.ObjectType()),
         th.Property("stream_map_config", th.ObjectType()),
