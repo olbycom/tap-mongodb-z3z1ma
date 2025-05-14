@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Any
 
-import genson
 import orjson
 import singer_sdk._singerlib.messages
 import singer_sdk.helpers._typing
@@ -36,63 +35,6 @@ def noop(*args, **kwargs) -> None:
 
 # Monkey patch the singer lib to silence the warning about unmapped properties
 singer_sdk.helpers._typing._warn_unmapped_properties = noop
-
-
-def recursively_drop_required(schema: dict) -> dict:
-    """Recursively drop the required property from a schema."""
-    schema.pop("required", None)
-    if "properties" in schema:
-        for prop in schema["properties"]:
-            if schema["properties"][prop].get("type") == "object":
-                schema["properties"][prop] = recursively_drop_required(schema["properties"][prop])
-    return schema
-
-
-def recursively_drop_null_types(schema: dict) -> dict:
-    """Recursively drop null types from a schema.
-
-    This is used to clean up genson generated schemas which may include null types."""
-
-    def process_node(node):
-        if isinstance(node, dict):
-            if "type" in node:
-                if isinstance(node["type"], list):
-                    # Only keep the type if removing null would leave other types
-                    if len(node["type"]) == 1 and node["type"][0] == "null":
-                        return None
-                elif node["type"] == "null":
-                    return None
-
-            for key, value in list(node.items()):
-                if isinstance(value, dict):
-                    result = process_node(value)
-                    if result is None:
-                        del node[key]
-                    else:
-                        node[key] = result
-                elif isinstance(value, list):
-                    result = [process_node(item) for item in value]
-                    node[key] = [item for item in result if item is not None]
-            if not node:
-                return None
-        return node
-
-    return process_node(schema) if schema else {}
-
-
-def infer_and_clean_schema(builder: genson.SchemaBuilder) -> dict:
-    """Infer schema from builder and clean it by dropping required and null types.
-
-    Args:
-        builder: The Genson schema builder.
-
-    Returns:
-        A cleaned schema dictionary.
-    """
-    schema = builder.to_schema()
-    schema = recursively_drop_required(schema)
-    schema = recursively_drop_null_types(schema)
-    return schema
 
 
 class TapMongoDB(Tap):
@@ -134,7 +76,7 @@ class TapMongoDB(Tap):
                 " missing the replication key. Useful if a very small percentage of documents"
                 " are missing the property."
             ),
-            default=False,
+            default=True,
         ),
         th.Property(
             "database_includes",
@@ -145,35 +87,6 @@ class TapMongoDB(Tap):
             "database_excludes",
             th.ArrayType(th.StringType),
             description=("A list of databases to exclude. If this list is empty, no databases" " will be excluded."),
-        ),
-        th.Property(
-            "strategy",
-            th.StringType,
-            description=(
-                "The strategy to use for schema resolution. Defaults to 'raw'. The 'raw' strategy"
-                " uses a relaxed schema using additionalProperties: true to accept the document"
-                " as-is leaving the target to respect it. Useful for blob or jsonl. The 'envelope'"
-                " strategy will serialize the document under a key named `document`. The target"
-                " should use a variant type for this key. The 'infer' strategy will infer the"
-                " schema from the data based on a configurable number of documents."
-            ),
-            default="raw",
-            allowed_values=["raw", "envelope", "infer"],
-        ),
-        th.Property(
-            "infer_schema_max_docs",
-            th.IntegerType,
-            description=(
-                "The maximum number of documents to sample when inferring the schema."
-                " This is only used when infer_schema is true."
-            ),
-            default=2_000,
-        ),
-        th.Property(
-            "no_cursor_timeout",
-            th.BooleanType,
-            description="If true, the cursor will not timeout.",
-            default=False,
         ),
         th.Property(
             "batch_size",
@@ -260,56 +173,20 @@ class TapMongoDB(Tap):
                 stream_name = f"{stream_prefix}_{collection}"
                 entry = CatalogEntry.from_dict({"tap_stream_id": stream_name})
                 entry.stream = stream_name
-                strategy: str | None = self.config.get("strategy")
-                if strategy == "infer":
-                    builder = genson.SchemaBuilder(schema_uri=None)
-                    for record in client[db_name][collection].aggregate(
-                        [{"$sample": {"size": self.config.get("infer_schema_max_docs", 2_000)}}]
-                    ):
-                        builder.add_object(
-                            orjson.loads(
-                                orjson.dumps(
-                                    record,
-                                    default=lambda o: str(o),
-                                    option=orjson.OPT_OMIT_MICROSECONDS,
-                                ).decode("utf-8")
-                            )
-                        )
-                    schema = infer_and_clean_schema(builder)
-                    if not schema:
-                        # If the schema is empty, skip the stream
-                        # this errs on the side of strictness
-                        continue
-                    internal_logger.info("Inferred schema: %s", schema)
-                elif strategy == "envelope":
-                    schema = {
-                        "type": "object",
-                        "description": "The document from the collection",
-                        "properties": {
-                            "_id": {
-                                "type": ["string", "null"],
-                                "description": "The document's _id",
-                            },
-                            "document": {
-                                "type": ["string", "null"],
-                                "description": "The serialized document",
-                            },
+                schema = {
+                    "type": "object",
+                    "description": "The document from the collection",
+                    "properties": {
+                        "_id": {
+                            "type": ["string", "null"],
+                            "description": "The document's _id",
                         },
-                    }
-                elif strategy == "raw":
-                    schema = {
-                        "type": "object",
-                        "additionalProperties": True,
-                        "description": "The document from the collection",
-                        "properties": {
-                            "_id": {
-                                "type": ["string", "null"],
-                                "description": "The document's _id",
-                            },
+                        "document": {
+                            "type": ["string", "null"],
+                            "description": "The serialized document",
                         },
-                    }
-                else:
-                    raise RuntimeError(f"Unknown strategy {strategy}")
+                    },
+                }
                 entry.schema = entry.schema.from_dict(schema)
                 entry.key_properties = ["_id"]
                 entry.metadata = entry.metadata.get_standard_metadata(schema=schema, key_properties=["_id"])
@@ -366,5 +243,5 @@ class TapMongoDB(Tap):
 
 
 # Use this to run the tap locally
-# if __name__ == "__main__":
-#     TapMongoDB.cli()
+if __name__ == "__main__":
+    TapMongoDB.cli()

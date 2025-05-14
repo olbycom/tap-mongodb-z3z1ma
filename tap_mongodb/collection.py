@@ -126,12 +126,7 @@ class CollectionStream(Stream):
     def get_records(self, context: dict | None) -> Iterable[dict]:
         bookmark = self.get_starting_replication_key_value(context)
         for record in self._collection.find({self.replication_key: {"$gt": bookmark}} if bookmark else {}):
-            if self._strategy == "envelope":
-                # Return the record wrapped in a document key
-                yield {"_id": record["_id"], "document": json.dumps(record, default=self._handle_unusual_types)}
-            else:
-                # Return the record as is
-                yield record
+            yield {"_id": record["_id"], "document": json.dumps(record, default=self._handle_unusual_types)}
 
     def _handle_unusual_types(self, obj):
         if isinstance(obj, datetime.datetime):
