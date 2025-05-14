@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
+import json
 import os
 import sys
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +18,11 @@ from custom_logger import internal_logger, user_logger
 from pymongo.mongo_client import MongoClient
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
+from singer_sdk._singerlib import Catalog, CatalogEntry, MetadataMapping, Schema
 from singer_sdk._singerlib.catalog import Catalog, CatalogEntry
+from singer_sdk.streams.core import REPLICATION_FULL_TABLE
 
-from tap_mongodb.collection import CollectionStream, MockCollection
+from tap_mongodb.collection import CollectionStream
 
 _BLANK = ""
 """A sentinel value to represent a blank value in the config."""
@@ -112,31 +117,22 @@ class TapMongoDB(Tap):
 
         return self.config["mongo"]
 
-    @property
-    def catalog_dict(self) -> dict:
-        """Get catalog dictionary.
-
-        Returns:
-            The tap's catalog as a dict
-        """
-        # Use cached catalog if available
-        if hasattr(self, "_catalog_dict") and self._catalog_dict:
-            return self._catalog_dict
-        # Defer to passed in catalog if available
-        if self.input_catalog:
-            return self.input_catalog.to_dict()
-        # Handle discovery in test mode
-        if "TAP_MONGO_TEST_NO_DB" in os.environ:
-            return {"streams": [{"tap_stream_id": "test", "stream": "test"}]}
-        # If no catalog is provided, discover streams
-        catalog = Catalog()
+    def discover_collections(
+        self,
+        tap_metadata: dict,
+    ) -> list[CatalogEntry]:
         client = MongoClient(**self.get_mongo_config())
+
         try:
             client.server_info()
         except Exception as exc:
-            raise RuntimeError("Could not connect to MongoDB to generate catalog") from exc
+            user_logger.error(f"Could not connect to MongoDB to generate catalog: {exc}")
+            sys.exit(1)
+
         db_includes = self.config.get("database_includes", [])
         db_excludes = self.config.get("database_excludes", [])
+
+        catalog_entries = []
         for db_name in client.list_database_names():
             if db_includes and db_name not in db_includes:
                 continue
@@ -145,81 +141,77 @@ class TapMongoDB(Tap):
             try:
                 collections = client[db_name].list_collection_names()
             except Exception:
-                # Skip databases that are not accessible by the authenticated user
-                # This is a common case when using a shared cluster
-                # https://docs.mongodb.com/manual/core/security-users/#database-user-privileges
-                # TODO: vet the list of exceptions that can be raised here to be more explicit
-                user_logger.debug(
-                    "Skipping database %s, authenticated user does not have permission to access",
-                    db_name,
+                user_logger.warning(
+                    f"Skipping database {db_name}, authenticated user does not have permission to access"
                 )
                 continue
             for collection in collections:
                 try:
                     client[db_name][collection].find_one()
                 except Exception:
-                    # Skip collections that are not accessible by the authenticated user
-                    # This is a common case when using a shared cluster
-                    # https://docs.mongodb.com/manual/core/security-users/#database-user-privileges
-                    # TODO: vet the list of exceptions that can be raised here to be more explicit
-                    user_logger.debug(
-                        ("Skipping collections %s, authenticated user does not have permission" " to access"),
-                        db_name,
+                    user_logger.warning(
+                        f"Skipping collection {collection}, authenticated user does not have permission to access",
                     )
                     continue
-                user_logger.info("Discovered collection %s.%s", db_name, collection)
+
+                user_logger.info(f"Discovered collection {db_name}.{collection}")
                 stream_prefix = self.config.get("stream_prefix", _BLANK)
                 stream_prefix += db_name.replace("-", "_").replace(".", "_")
                 stream_name = f"{stream_prefix}_{collection}"
-                entry = CatalogEntry.from_dict({"tap_stream_id": stream_name})
-                entry.stream = stream_name
-                schema = {
-                    "type": "object",
-                    "description": "The document from the collection",
-                    "properties": {
-                        "_id": {
-                            "type": ["string", "null"],
-                            "description": "The document's _id",
-                        },
-                        "document": {
-                            "type": ["string", "null"],
-                            "description": "The serialized document",
-                        },
-                    },
-                }
-                entry.schema = entry.schema.from_dict(schema)
-                entry.key_properties = ["_id"]
-                entry.metadata = entry.metadata.get_standard_metadata(schema=schema, key_properties=["_id"])
-                entry.database = db_name
-                entry.table = collection
-                catalog.add_stream(entry)
-        self._catalog_dict = catalog.to_dict()
-        return self._catalog_dict
 
-    def discover_streams(self) -> list[Stream]:
-        """Return a list of discovered streams."""
-        if "TAP_MONGO_TEST_NO_DB" in os.environ:
-            # This is a hack to allow the tap to be tested without a MongoDB instance
-            return [
-                CollectionStream(
-                    tap=self,
-                    name="test",
-                    schema={
-                        "type": "object",
-                        "properties": {
-                            "_id": {
-                                "type": ["string", "null"],
-                                "description": "The document's _id",
-                            },
-                        },
-                        "additionalProperties": True,
-                    },
-                    collection=MockCollection(
-                        name="test",
-                        schema={},
-                    ),
+                stream_metadata = tap_metadata.get(stream_name, {})
+                replication_key: str | None = stream_metadata.get("replication-key")
+                replication_method: str = stream_metadata.get("replication-method", REPLICATION_FULL_TABLE)
+
+                schema = th.PropertiesList(
+                    th.Property("_id", th.StringType),
+                    th.Property("document", th.StringType),
                 )
-            ]
+
+                if replication_key:
+                    replication_key_type = self.get_replication_key_type(
+                        client[db_name][collection].find({replication_key: {"$ne": None}}, limit=5),
+                        stream_name,
+                    )
+                    schema.append(th.Property(replication_key, replication_key_type))
+
+                metadata = MetadataMapping.get_standard_metadata(
+                    schema=schema.to_dict(),
+                    replication_method=replication_method,
+                    selected_by_default=True,
+                )
+
+                catalog_entry = CatalogEntry(
+                    tap_stream_id=stream_name,
+                    stream=stream_name,
+                    metadata=metadata,
+                    key_properties=["_id"],
+                    schema=Schema.from_dict(schema.to_dict()),
+                    database=db_name,
+                    table=collection,
+                )
+
+                catalog_entries.append(catalog_entry)
+
+        return catalog_entries
+
+    @cached_property
+    def catalog(self) -> Catalog:
+        """Get the tap's working catalog.
+
+        Returns:
+            A Singer catalog object.
+        """
+        tap_metadata = {}  # json.loads(os.environ[f"{self._env_var_prefix}_METADATA"])
+        catalog: Catalog = Catalog()
+        catalog_entries: list[CatalogEntry] = []
+        catalog_entries.extend(self.discover_collections(tap_metadata))
+        for entry in catalog_entries:
+            catalog.add_stream(entry=entry)
+        return catalog
+
+    def discover_streams(self) -> list[Stream]:  # type: ignore
+        """Return a list of discovered streams."""
         client = MongoClient(**self.get_mongo_config())
         try:
             client.server_info()
@@ -240,6 +232,25 @@ class TapMongoDB(Tap):
             )
             stream.apply_catalog(self.catalog)
             yield stream
+
+    def get_replication_key_type(self, sample_documents: list[dict[str, Any]], stream_name: str) -> th.AnyType | None:
+        for doc in sample_documents:
+            if isinstance(doc, dict):
+                for _, value in doc.items():
+                    if isinstance(value, int):
+                        return th.IntegerType
+                    elif isinstance(value, datetime.datetime):
+                        return th.DateTimeType
+                    else:
+                        self.logger.error(
+                            f"Invalid replication key type for stream `{stream_name}`: {type(value)}. Please choose a different key with type integer or datetime."
+                        )
+                        sys.exit(1)
+            else:
+                self.logger.error(
+                    f"Replication key not found for stream `{stream_name}`. Please choose a different key with type integer or datetime."
+                )
+                sys.exit(1)
 
 
 # Use this to run the tap locally
