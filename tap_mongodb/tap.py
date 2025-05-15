@@ -14,13 +14,15 @@ import orjson
 import singer_sdk._singerlib.messages
 import singer_sdk.helpers._typing
 import yaml
+from bson import Timestamp
 from custom_logger import internal_logger, user_logger
 from pymongo.mongo_client import MongoClient
+from pymongo.synchronous.cursor import Cursor
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
 from singer_sdk._singerlib import Catalog, CatalogEntry, MetadataMapping, Schema
 from singer_sdk._singerlib.catalog import Catalog, CatalogEntry
-from singer_sdk.streams.core import REPLICATION_FULL_TABLE
+from singer_sdk.streams.core import REPLICATION_FULL_TABLE, REPLICATION_INCREMENTAL
 
 from tap_mongodb.collection import CollectionStream
 
@@ -169,9 +171,10 @@ class TapMongoDB(Tap):
                 )
 
                 if replication_key:
-                    replication_key_type = self.get_replication_key_type(
-                        client[db_name][collection].find({replication_key: {"$ne": None}}, limit=5),
+                    replication_key_type = self.get_replication_key_schema_type(
+                        client[db_name][collection].find_one({replication_key: {"$ne": None}}),
                         stream_name,
+                        replication_key,
                     )
                     schema.append(th.Property(replication_key, replication_key_type))
 
@@ -202,7 +205,7 @@ class TapMongoDB(Tap):
         Returns:
             A Singer catalog object.
         """
-        tap_metadata = {}  # json.loads(os.environ[f"{self._env_var_prefix}_METADATA"])
+        tap_metadata = json.loads(os.environ[f"{self._env_var_prefix}_METADATA"])
         catalog: Catalog = Catalog()
         catalog_entries: list[CatalogEntry] = []
         catalog_entries.extend(self.discover_collections(tap_metadata))
@@ -233,24 +236,26 @@ class TapMongoDB(Tap):
             stream.apply_catalog(self.catalog)
             yield stream
 
-    def get_replication_key_type(self, sample_documents: list[dict[str, Any]], stream_name: str) -> th.AnyType | None:
-        for doc in sample_documents:
-            if isinstance(doc, dict):
-                for _, value in doc.items():
-                    if isinstance(value, int):
-                        return th.IntegerType
-                    elif isinstance(value, datetime.datetime):
-                        return th.DateTimeType
-                    else:
-                        self.logger.error(
-                            f"Invalid replication key type for stream `{stream_name}`: {type(value)}. Please choose a different key with type integer or datetime."
-                        )
-                        sys.exit(1)
+    def get_replication_key_schema_type(
+        self, sample_document: dict | None, stream_name: str, replication_key: str
+    ) -> th.AnyType | None:
+        if sample_document:
+            if isinstance(sample_document.get(replication_key), int):
+                return th.IntegerType
+            elif isinstance(sample_document.get(replication_key), datetime.datetime):
+                return th.DateTimeType
+            elif isinstance(sample_document.get(replication_key), Timestamp):
+                return th.IntegerType
             else:
                 self.logger.error(
-                    f"Replication key not found for stream `{stream_name}`. Please choose a different key with type integer or datetime."
+                    f"Invalid replication key type for stream `{stream_name}`: {type(sample_document.get(replication_key))}. Please choose a different key with type integer or datetime."
                 )
                 sys.exit(1)
+
+        self.logger.error(
+            f"Replication key not found on stream `{stream_name}`. Please choose a different key with type integer or datetime."
+        )
+        sys.exit(1)
 
 
 # Use this to run the tap locally

@@ -5,12 +5,14 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import sys
 from typing import Any, Generator, Iterable
 
 import singer_sdk._singerlib as singer
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
 from pymongo.collection import Collection
+from pymongo.synchronous.cursor import Cursor
 from singer_sdk import Stream
 from singer_sdk.helpers._state import increment_state
 from singer_sdk.helpers._util import utc_now
@@ -45,14 +47,19 @@ class CollectionStream(Stream):
         """Initialize the stream."""
         super().__init__(tap=tap, schema=schema, name=name)
         self._collection = collection
+        self.replication_key_mongo_type = None
 
     def get_records(self, context: dict | None) -> Iterable[dict]:
-        bookmark = self.get_starting_replication_key_value(context)
-        cursor = (
-            self._collection.find({self.replication_key: {"$gt": bookmark}}).sort(self.replication_key, -1)
-            if bookmark
-            else self._collection.find()
-        )
+        bookmark = self._get_mongo_compatible_replication_key(context, self._collection)
+        if bookmark:
+            self._collection.create_index(self.replication_key)
+            cursor = self._collection.find({self.replication_key: {"$gt": bookmark}}).sort(self.replication_key, -1)
+        else:
+            cursor = self._collection.find()
+
+        batch_size = self.config.get("batch_size")
+        if batch_size and batch_size > 0:
+            cursor = cursor.batch_size(batch_size)
 
         for record in cursor:
             processed_record = {
@@ -60,7 +67,9 @@ class CollectionStream(Stream):
                 "document": json.dumps(record, default=self._handle_unusual_types),
             }
             if self.replication_key:
-                processed_record[self.replication_key] = record[self.replication_key]
+                processed_record[self.replication_key] = self._process_replication_key_value(
+                    record[self.replication_key]
+                )
             transformed_record = self.post_process(processed_record, context)
             yield transformed_record
 
@@ -69,8 +78,50 @@ class CollectionStream(Stream):
             return obj.isoformat()
         elif isinstance(obj, ObjectId):
             return str(obj)
+        elif isinstance(obj, Timestamp):
+            return str(obj)
         else:
             return str(obj)
+
+    def _process_replication_key_value(self, value: Any) -> Any:
+        if self.replication_key_mongo_type == "timestamp":
+            return self._from_timestamp_to_int(value)
+        else:
+            return value
+
+    def _from_timestamp_to_int(self, timestamp: Timestamp) -> int:
+        return int((timestamp.time << 32) | timestamp.inc)
+
+    def _from_int_to_timestamp(self, timestamp: int) -> Timestamp:
+        return Timestamp(timestamp >> 32, timestamp & 0xFFFFFFFF)
+
+    def _get_mongo_compatible_replication_key(self, context: dict | None, collection: Collection) -> Any | None:
+        bookmark = self.get_starting_replication_key_value(context)
+        if not bookmark:
+            return None
+
+        doc = collection.find_one({self.replication_key: {"$ne": None}})
+
+        if not doc:
+            self.logger.error(
+                f"Replication key not found on documents for collection `{self.name}`. Please choose a different key and try again."
+            )
+            sys.exit(1)
+
+        if isinstance(doc.get(self.replication_key), int):
+            self.replication_key_mongo_type = "integer"
+            return bookmark
+        elif isinstance(doc.get(self.replication_key), datetime.datetime):
+            self.replication_key_mongo_type = "datetime"
+            return datetime.datetime.fromisoformat(bookmark)
+        elif isinstance(doc.get(self.replication_key), Timestamp):
+            self.replication_key_mongo_type = "timestamp"
+            return self._from_int_to_timestamp(bookmark)
+        else:
+            self.logger.error(
+                f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
+            )
+            sys.exit(1)
 
     def _generate_record_messages(
         self,
