@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import sys
+from functools import cached_property
 from typing import Any, Generator, Iterable
 
 import singer_sdk._singerlib as singer
@@ -47,7 +48,28 @@ class CollectionStream(Stream):
         """Initialize the stream."""
         super().__init__(tap=tap, schema=schema, name=name)
         self._collection = collection
-        self.replication_key_mongo_type = None
+
+    @cached_property
+    def replication_key_mongo_type(self) -> str:
+        doc = self._collection.find_one({self.replication_key: {"$ne": None}})
+
+        if not doc:
+            self.logger.error(
+                f"Replication key not found on documents for collection `{self.name}`. Please choose a different key and try again."
+            )
+            sys.exit(1)
+
+        if isinstance(doc.get(self.replication_key), int):
+            return "integer"
+        elif isinstance(doc.get(self.replication_key), datetime.datetime):
+            return "datetime"
+        elif isinstance(doc.get(self.replication_key), Timestamp):
+            return "timestamp"
+        else:
+            self.logger.error(
+                f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
+            )
+            sys.exit(1)
 
     def get_records(self, context: dict | None) -> Iterable[dict]:
         bookmark = self._get_mongo_compatible_replication_key(context, self._collection)
@@ -100,22 +122,11 @@ class CollectionStream(Stream):
         if not bookmark:
             return None
 
-        doc = collection.find_one({self.replication_key: {"$ne": None}})
-
-        if not doc:
-            self.logger.error(
-                f"Replication key not found on documents for collection `{self.name}`. Please choose a different key and try again."
-            )
-            sys.exit(1)
-
-        if isinstance(doc.get(self.replication_key), int):
-            self.replication_key_mongo_type = "integer"
+        if self.replication_key_mongo_type == "integer":
             return bookmark
-        elif isinstance(doc.get(self.replication_key), datetime.datetime):
-            self.replication_key_mongo_type = "datetime"
+        elif self.replication_key_mongo_type == "datetime":
             return datetime.datetime.fromisoformat(bookmark)
-        elif isinstance(doc.get(self.replication_key), Timestamp):
-            self.replication_key_mongo_type = "timestamp"
+        elif self.replication_key_mongo_type == "timestamp":
             return self._from_int_to_timestamp(bookmark)
         else:
             self.logger.error(
