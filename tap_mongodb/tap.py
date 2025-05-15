@@ -248,12 +248,12 @@ class TapMongoDB(Tap):
                 return th.IntegerType
             else:
                 self.logger.error(
-                    f"Invalid replication key type for stream `{stream_name}`: {type(sample_document.get(replication_key))}. Please choose a different key with type integer or datetime."
+                    f"Invalid replication key type for stream `{stream_name}`: {type(sample_document.get(replication_key))}. Allowed types are: int32, int64, date and timestamp."
                 )
                 sys.exit(1)
 
         self.logger.error(
-            f"Replication key not found on stream `{stream_name}`. Please choose a different key with type integer or datetime."
+            f"Replication key not found on documents for stream `{stream_name}`. Please choose a key that exists on documents with type int32, int64, date or timestamp."
         )
         sys.exit(1)
 
