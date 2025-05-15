@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import collections
 import datetime
 import json
 import os
-from typing import Any, Generator, Iterable, MutableMapping
+import sys
+from functools import cached_property
+from typing import Any, Generator, Iterable
 
-import orjson
 import singer_sdk._singerlib as singer
-import singer_sdk.helpers._flattening
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
-from custom_logger import user_logger
 from pymongo.collection import Collection
+from pymongo.synchronous.cursor import Cursor
 from singer_sdk import Stream
 from singer_sdk.helpers._state import increment_state
 from singer_sdk.helpers._util import utc_now
@@ -26,50 +25,6 @@ from singer_sdk.streams.core import (
 )
 
 
-def _flatten_record(
-    record_node: MutableMapping[Any, Any],
-    flattened_schema: dict | None = None,
-    parent_key: list[str] | None = None,
-    separator: str = "__",
-    level: int = 0,
-    max_level: int = 0,
-) -> dict:
-    if parent_key is None:
-        parent_key = []
-    items: list[tuple[str, Any]] = []
-    for k, v in record_node.items():
-        new_key = singer_sdk.helpers._flattening.flatten_key(k, parent_key, separator)
-        if isinstance(v, collections.abc.MutableMapping) and level < max_level:
-            items.extend(
-                _flatten_record(
-                    v,
-                    flattened_schema,
-                    parent_key + [k],
-                    separator=separator,
-                    level=level + 1,
-                    max_level=max_level,
-                ).items()
-            )
-        else:
-            items.append(
-                (
-                    new_key,
-                    # Override the default json encoder to use orjson
-                    # and a string encoder for ObjectIds, etc.
-                    (
-                        orjson.dumps(v, default=lambda o: str(o), option=orjson.OPT_OMIT_MICROSECONDS).decode("utf-8")
-                        if singer_sdk.helpers._flattening._should_jsondump_value(k, v, flattened_schema)
-                        else v
-                    ),
-                )
-            )
-    return dict(items)
-
-
-# Monkey patch the singer lib to use orjson + bson json_util default
-singer_sdk.helpers._flattening._flatten_record = _flatten_record
-
-
 class CollectionStream(Stream):
     """Collection stream class.
 
@@ -78,11 +33,6 @@ class CollectionStream(Stream):
 
     # The output stream will always have _id as the primary key
     primary_keys = ["_id"]
-
-    # Disable timestamp replication keys. One caveat is this relies on an
-    # alphanumerically sortable replication key. Python __gt__ and __lt__ are
-    # used to compare the replication key values. This works for most cases.
-    is_timestamp_replication_key = False
 
     # No conformance level is set by default since this is a generic stream
     TYPE_CONFORMANCE_LEVEL = TypeConformanceLevel.NONE
@@ -98,43 +48,91 @@ class CollectionStream(Stream):
         """Initialize the stream."""
         super().__init__(tap=tap, schema=schema, name=name)
         self._collection = collection
-        self._strategy = self.config.get("strategy", "raw")
 
-    def _make_resume_token(oplog_doc: dict):
-        """Make a resume token the hard way for Mongo <=3.6
+    @cached_property
+    def replication_key_mongo_type(self) -> str:
+        doc = self._collection.find_one({self.replication_key: {"$ne": None}})
 
-        The idea here is to use change streams but there are nuances that don't fit a batch use
-        case such as the fact it is a capped collection."""
-        rt = b"\x82"
-        rt += oplog_doc["ts"].time.to_bytes(4, byteorder="big") + oplog_doc["ts"].inc.to_bytes(4, byteorder="big")
-        rt += b"\x46\x64\x5f\x69\x64\x00\x64"
-        rt += bytes.fromhex(str(oplog_doc["o"]["_id"]))
-        rt += b"\x00\x5a\x10\x04"
-        rt += oplog_doc["ui"].bytes
-        rt += b"\x04"
+        if not doc:
+            self.logger.error(
+                f"Replication key not found on documents for collection `{self.name}`. Please choose a different key and try again."
+            )
+            sys.exit(1)
 
-        return {"_data": rt}
-
-    def _make_start_op_time(self):
-        """Make a Timestamp used to resume a change stream for Mongo >3.6
-
-        The idea here is to use change streams but there are nuances that don't fit a batch use
-        case such as the fact it is a capped collection."""
-        first_record: ObjectId = list(self._collection.find(projection=[]).sort("_id", 1).limit(1))[0]["_id"]
-        return Timestamp(first_record.generation_time, first_record._inc)
+        if isinstance(doc.get(self.replication_key), int):
+            return "integer"
+        elif isinstance(doc.get(self.replication_key), datetime.datetime):
+            return "datetime"
+        elif isinstance(doc.get(self.replication_key), Timestamp):
+            return "timestamp"
+        else:
+            self.logger.error(
+                f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
+            )
+            sys.exit(1)
 
     def get_records(self, context: dict | None) -> Iterable[dict]:
-        bookmark = self.get_starting_replication_key_value(context)
-        for record in self._collection.find({self.replication_key: {"$gt": bookmark}} if bookmark else {}):
-            yield {"_id": record["_id"], "document": json.dumps(record, default=self._handle_unusual_types)}
+        bookmark = self._get_mongo_compatible_replication_key(context, self._collection)
+        if bookmark:
+            self._collection.create_index(self.replication_key)
+            cursor = self._collection.find({self.replication_key: {"$gt": bookmark}}).sort(self.replication_key, -1)
+        else:
+            cursor = self._collection.find()
+
+        batch_size = self.config.get("batch_size")
+        if batch_size and batch_size > 0:
+            cursor = cursor.batch_size(batch_size)
+
+        for record in cursor:
+            processed_record = {
+                "_id": record["_id"],
+                "document": json.dumps(record, default=self._handle_unusual_types),
+            }
+            if self.replication_key:
+                processed_record[self.replication_key] = self._process_replication_key_value(
+                    record[self.replication_key]
+                )
+            transformed_record = self.post_process(processed_record, context)
+            yield transformed_record
 
     def _handle_unusual_types(self, obj):
         if isinstance(obj, datetime.datetime):
             return obj.isoformat()
         elif isinstance(obj, ObjectId):
             return str(obj)
+        elif isinstance(obj, Timestamp):
+            return str(obj)
         else:
             return str(obj)
+
+    def _process_replication_key_value(self, value: Any) -> Any:
+        if self.replication_key_mongo_type == "timestamp":
+            return self._from_timestamp_to_int(value)
+        else:
+            return value
+
+    def _from_timestamp_to_int(self, timestamp: Timestamp) -> int:
+        return int((timestamp.time << 32) | timestamp.inc)
+
+    def _from_int_to_timestamp(self, timestamp: int) -> Timestamp:
+        return Timestamp(timestamp >> 32, timestamp & 0xFFFFFFFF)
+
+    def _get_mongo_compatible_replication_key(self, context: dict | None, collection: Collection) -> Any | None:
+        bookmark = self.get_starting_replication_key_value(context)
+        if not bookmark:
+            return None
+
+        if self.replication_key_mongo_type == "integer":
+            return bookmark
+        elif self.replication_key_mongo_type == "datetime":
+            return datetime.datetime.fromisoformat(bookmark)
+        elif self.replication_key_mongo_type == "timestamp":
+            return self._from_int_to_timestamp(bookmark)
+        else:
+            self.logger.error(
+                f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
+            )
+            sys.exit(1)
 
     def _generate_record_messages(
         self,
