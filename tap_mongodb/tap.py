@@ -14,7 +14,7 @@ import orjson
 import singer_sdk._singerlib.messages
 import singer_sdk.helpers._typing
 import yaml
-from bson import Timestamp
+from bson import ObjectId, Timestamp
 from custom_logger import internal_logger, user_logger
 from pymongo.mongo_client import MongoClient
 from pymongo.synchronous.cursor import Cursor
@@ -170,7 +170,7 @@ class TapMongoDB(Tap):
                     th.Property("document", th.StringType),
                 )
 
-                if replication_key:
+                if replication_key and replication_key != "_id":  # in case it's _id, we already have it in the schema
                     replication_key_type = self.get_replication_key_schema_type(
                         client[db_name][collection].find_one({replication_key: {"$ne": None}}),
                         stream_name,
@@ -205,7 +205,7 @@ class TapMongoDB(Tap):
         Returns:
             A Singer catalog object.
         """
-        tap_metadata = json.loads(os.environ[f"{self._env_var_prefix}_METADATA"])
+        tap_metadata = json.loads(os.environ.get(f"{self._env_var_prefix}_METADATA", "{}"))
         catalog: Catalog = Catalog()
         catalog_entries: list[CatalogEntry] = []
         catalog_entries.extend(self.discover_collections(tap_metadata))

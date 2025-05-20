@@ -65,6 +65,8 @@ class CollectionStream(Stream):
             return "datetime"
         elif isinstance(doc.get(self.replication_key), Timestamp):
             return "timestamp"
+        elif isinstance(doc.get(self.replication_key), ObjectId):
+            return "objectid"
         else:
             self.logger.error(
                 f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
@@ -88,7 +90,7 @@ class CollectionStream(Stream):
                 "_id": record["_id"],
                 "document": json.dumps(record, default=self._handle_unusual_types),
             }
-            if self.replication_key:
+            if self.replication_key and self.replication_key != "_id":
                 processed_record[self.replication_key] = self._process_replication_key_value(
                     record[self.replication_key]
                 )
@@ -128,6 +130,8 @@ class CollectionStream(Stream):
             return datetime.datetime.fromisoformat(bookmark)
         elif self.replication_key_mongo_type == "timestamp":
             return self._from_int_to_timestamp(bookmark)
+        elif self.replication_key_mongo_type == "objectid":
+            return ObjectId(bookmark)
         else:
             self.logger.error(
                 f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
