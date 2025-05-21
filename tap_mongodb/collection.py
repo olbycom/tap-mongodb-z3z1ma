@@ -9,15 +9,15 @@ import sys
 from functools import cached_property
 from typing import Any, Generator, Iterable
 
-import singer_sdk._singerlib as singer
+import nekt_singer_sdk.singerlib as singer
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
+from nekt_singer_sdk import Stream
+from nekt_singer_sdk.helpers._state import increment_state
+from nekt_singer_sdk.helpers._util import utc_now
+from nekt_singer_sdk.plugin_base import PluginBase as TapBaseClass
 from pymongo.collection import Collection
 from pymongo.synchronous.cursor import Cursor
-from singer_sdk import Stream
-from singer_sdk.helpers._state import increment_state
-from singer_sdk.helpers._util import utc_now
-from singer_sdk.plugin_base import PluginBase as TapBaseClass
 from singer_sdk.streams.core import (
     REPLICATION_INCREMENTAL,
     REPLICATION_LOG_BASED,

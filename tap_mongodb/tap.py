@@ -10,19 +10,18 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+import nekt_singer_sdk.helpers._typing
+import nekt_singer_sdk.singerlib.messages
 import orjson
-import singer_sdk._singerlib.messages
-import singer_sdk.helpers._typing
 import yaml
-from bson import ObjectId, Timestamp
-from custom_logger import internal_logger, user_logger
+from bson import Timestamp
+from nekt_singer_sdk import Stream, Tap
+from nekt_singer_sdk import typing as th
+from nekt_singer_sdk.custom_logger import internal_logger, user_logger
+from nekt_singer_sdk.singerlib import MetadataMapping, Schema
+from nekt_singer_sdk.singerlib.catalog import Catalog, CatalogEntry
+from nekt_singer_sdk.streams.core import REPLICATION_FULL_TABLE
 from pymongo.mongo_client import MongoClient
-from pymongo.synchronous.cursor import Cursor
-from singer_sdk import Stream, Tap
-from singer_sdk import typing as th
-from singer_sdk._singerlib import Catalog, CatalogEntry, MetadataMapping, Schema
-from singer_sdk._singerlib.catalog import Catalog, CatalogEntry
-from singer_sdk.streams.core import REPLICATION_FULL_TABLE, REPLICATION_INCREMENTAL
 
 from tap_mongodb.collection import CollectionStream
 
@@ -30,7 +29,7 @@ _BLANK = ""
 """A sentinel value to represent a blank value in the config."""
 
 # Monkey patch the singer lib to use orjson
-singer_sdk._singerlib.messages.format_message = lambda message: orjson.dumps(
+nekt_singer_sdk.singerlib.messages.format_message = lambda message: orjson.dumps(
     message.to_dict(), default=lambda o: str(o), option=orjson.OPT_OMIT_MICROSECONDS
 ).decode("utf-8")
 
@@ -41,13 +40,14 @@ def noop(*args, **kwargs) -> None:
 
 
 # Monkey patch the singer lib to silence the warning about unmapped properties
-singer_sdk.helpers._typing._warn_unmapped_properties = noop
+nekt_singer_sdk.helpers._typing._warn_unmapped_properties = noop
 
 
 class TapMongoDB(Tap):
     """MongoDB tap class."""
 
     name = "tap-mongodb"
+
     config_jsonschema = th.PropertiesList(
         th.Property(
             "mongo",
@@ -125,38 +125,57 @@ class TapMongoDB(Tap):
     ) -> list[CatalogEntry]:
         client = MongoClient(**self.get_mongo_config())
 
-        try:
-            client.server_info()
-        except Exception as exc:
-            user_logger.error(f"Could not connect to MongoDB to generate catalog: {exc}")
-            sys.exit(1)
-
         db_includes = self.config.get("database_includes", [])
         db_excludes = self.config.get("database_excludes", [])
 
         catalog_entries = []
-        for db_name in client.list_database_names():
+        self.user_discovery_logger.info("Discovering databases...")
+        databases = client.list_database_names()
+        if databases:
+            db_list = "\n\t- " + "\n\t- ".join(databases)
+            self.user_discovery_logger.info(f"Discovered databases ({len(databases)}): {db_list}")
+        else:
+            self.user_discovery_logger.error("No databases discovered, please check your configurations.")
+            return []
+
+        for db_name in databases:
             if db_includes and db_name not in db_includes:
-                continue
-            if db_excludes and db_name in db_excludes:
-                continue
-            try:
-                collections = client[db_name].list_collection_names()
-            except Exception:
-                user_logger.warning(
-                    f"Skipping database {db_name}, authenticated user does not have permission to access"
+                self.user_discovery_logger.info(
+                    f"Skipping database '{db_name}' (database not in database_includes config)."
                 )
                 continue
+            if db_excludes and db_name in db_excludes:
+                self.user_discovery_logger.info(
+                    f"Skipping database '{db_name}' (database in database_excludes config)."
+                )
+                continue
+            try:
+                self.user_discovery_logger.info(f"Discovering collections for database '{db_name}'...")
+                collections = client[db_name].list_collection_names()
+            except Exception:
+                self.user_discovery_logger.warning(
+                    f"Skipping database '{db_name}', authenticated user does not have permission to access."
+                )
+                continue
+
+            if collections:
+                collection_list = "\n\t- " + "\n\t- ".join(collections)
+                self.user_discovery_logger.info(
+                    f"Discovered {len(collections)} collections for database '{db_name}': {collection_list}"
+                )
+            else:
+                self.user_discovery_logger.warning(f"No collections discovered for database '{db_name}'.")
+                continue
+
             for collection in collections:
                 try:
                     client[db_name][collection].find_one()
                 except Exception:
-                    user_logger.warning(
-                        f"Skipping collection {collection}, authenticated user does not have permission to access",
+                    self.user_discovery_logger.warning(
+                        f"Skipping collection '{collection}', authenticated user does not have permission to access.",
                     )
                     continue
 
-                user_logger.info(f"Discovered collection {db_name}.{collection}")
                 stream_prefix = self.config.get("stream_prefix", _BLANK)
                 stream_prefix += db_name.replace("-", "_").replace(".", "_")
                 stream_name = f"{stream_prefix}_{collection}"
@@ -215,18 +234,20 @@ class TapMongoDB(Tap):
 
     def discover_streams(self) -> list[Stream]:  # type: ignore
         """Return a list of discovered streams."""
+        self.user_discovery_logger.info("Discovering streams...")
+
         client = MongoClient(**self.get_mongo_config())
+
         try:
-            client.server_info()
-        except Exception as e:
-            raise RuntimeError("Could not connect to MongoDB") from e
-        db_includes = self.config.get("database_includes", [])
-        db_excludes = self.config.get("database_excludes", [])
+            user_logger.info("Connecting to MongoDB...")
+            info = client.server_info()
+            user_logger.info("Connected to MongoDB" + (f" (v{info.get('version')})." if info.get("version") else "."))
+        except Exception as exc:
+            user_logger.error(f"Could not connect to MongoDB: {exc}")
+            sys.exit(1)
+
+        streams: list[Stream] = []
         for entry in self.catalog.streams:
-            if entry.database in db_excludes:
-                continue
-            if db_includes and entry.database not in db_includes:
-                continue
             stream = CollectionStream(
                 tap=self,
                 name=entry.tap_stream_id,
@@ -234,7 +255,15 @@ class TapMongoDB(Tap):
                 collection=client[entry.database][entry.table],
             )
             stream.apply_catalog(self.catalog)
-            yield stream
+            streams.append(stream)
+
+        if streams:
+            stream_list = "\n\t- " + "\n\t- ".join([stream.name for stream in streams])
+            self.user_discovery_logger.info(f"Discovered streams ({len(streams)}): {stream_list}")
+        else:
+            self.user_discovery_logger.error("No streams discovered, please check your configurations.")
+
+        return streams
 
     def get_replication_key_schema_type(
         self, sample_document: dict | None, stream_name: str, replication_key: str
