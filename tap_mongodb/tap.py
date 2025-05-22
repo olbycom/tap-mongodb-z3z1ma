@@ -17,7 +17,6 @@ import yaml
 from bson import Timestamp
 from nekt_singer_sdk import Stream, Tap
 from nekt_singer_sdk import typing as th
-from nekt_singer_sdk.custom_logger import internal_logger, user_logger
 from nekt_singer_sdk.singerlib import MetadataMapping, Schema
 from nekt_singer_sdk.singerlib.catalog import Catalog, CatalogEntry
 from nekt_singer_sdk.streams.core import REPLICATION_FULL_TABLE
@@ -114,7 +113,7 @@ class TapMongoDB(Tap):
                     with open(mongo_file_location) as f:
                         return yaml.safe_load(f)
                 except ValueError:
-                    internal_logger.critical(f"The YAML mongo_file_location '{mongo_file_location}' has errors")
+                    self.internal_logger.critical(f"The YAML mongo_file_location '{mongo_file_location}' has errors")
                     sys.exit(1)
 
         return self.config["mongo"]
@@ -239,11 +238,13 @@ class TapMongoDB(Tap):
         client = MongoClient(**self.get_mongo_config())
 
         try:
-            user_logger.info("Connecting to MongoDB...")
+            self.user_logger.info("Connecting to MongoDB...")
             info = client.server_info()
-            user_logger.info("Connected to MongoDB" + (f" (v{info.get('version')})." if info.get("version") else "."))
+            self.user_logger.info(
+                "Connected to MongoDB" + (f" (v{info.get('version')})." if info.get("version") else ".")
+            )
         except Exception as exc:
-            user_logger.error(f"Could not connect to MongoDB: {exc}")
+            self.user_logger.error(f"Could not connect to MongoDB: {exc}")
             sys.exit(1)
 
         streams: list[Stream] = []
