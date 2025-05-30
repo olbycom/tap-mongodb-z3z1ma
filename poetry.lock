@@ -669,8 +669,8 @@ singer-sdk = ">=0.46.0,<0.47.0"
 
 [package.source]
 type = "git"
-url = "https://github.com/nektcom/singer-sdk.git"
-reference = "HEAD"
+url = "https://github.com/olbycom/singer-sdk.git"
+reference = "v0.2.3"
 resolved_reference = "7b9a7928bb50e926dd82e5d0a9aa65384e9f6f00"
 
 [[package]]
@@ -1646,4 +1646,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11"
-content-hash = "865afb566929b78ee3599601f87e12f45a67591927ad02f27ea1b2bb5947c179"
+content-hash = "642e29848cd707497245acc99d88a458c538150f596d0d7ee0d8f703769c9b3e"
