@@ -656,7 +656,7 @@ files = [
 
 [[package]]
 name = "nekt-singer-sdk"
-version = "0.2.3"
+version = "0.2.4"
 description = "Add your description here"
 optional = false
 python-versions = ">=3.11"
@@ -670,8 +670,8 @@ singer-sdk = ">=0.46.0,<0.47.0"
 [package.source]
 type = "git"
 url = "https://github.com/olbycom/singer-sdk.git"
-reference = "v0.2.3"
-resolved_reference = "7b9a7928bb50e926dd82e5d0a9aa65384e9f6f00"
+reference = "v0.2.4"
+resolved_reference = "195455152a69c9fc356c54ac8c4ef4a6571d07c9"
 
 [[package]]
 name = "orjson"
@@ -1646,4 +1646,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11"
-content-hash = "642e29848cd707497245acc99d88a458c538150f596d0d7ee0d8f703769c9b3e"
+content-hash = "32eabd3390baceb1c4c02d39b39cc00f55198532f805839fc4d406e42567f27c"
