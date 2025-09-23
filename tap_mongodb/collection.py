@@ -103,7 +103,9 @@ class CollectionStream(Stream):
             return obj.isoformat()
         elif isinstance(obj, DatetimeMS):
             # Handle out-of-range dates from DATETIME_AUTO conversion
-            return obj.isoformat()
+            # Return None (null in JSON) for out-of-range dates that can't be
+            # represented as valid datetime strings
+            return None
         elif isinstance(obj, ObjectId):
             return str(obj)
         elif isinstance(obj, Timestamp):
