@@ -15,6 +15,7 @@ import nekt_singer_sdk.singerlib.messages
 import orjson
 import yaml
 from bson import Timestamp
+from bson.codec_options import DatetimeConversion
 from nekt_singer_sdk import Stream, Tap
 from nekt_singer_sdk import typing as th
 from nekt_singer_sdk.singerlib import MetadataMapping, Schema
@@ -122,7 +123,11 @@ class TapMongoDB(Tap):
         self,
         tap_metadata: dict,
     ) -> list[CatalogEntry]:
-        client = MongoClient(**self.get_mongo_config())
+        mongo_config = self.get_mongo_config()
+        # Set datetime_conversion to handle out-of-range dates
+        if 'datetime_conversion' not in mongo_config:
+            mongo_config['datetime_conversion'] = DatetimeConversion.DATETIME_AUTO
+        client = MongoClient(**mongo_config)
 
         db_includes = self.config.get("database_includes", [])
         db_excludes = self.config.get("database_excludes", [])
@@ -235,7 +240,11 @@ class TapMongoDB(Tap):
         """Return a list of discovered streams."""
         self.user_discovery_logger.info("Discovering streams...")
 
-        client = MongoClient(**self.get_mongo_config())
+        mongo_config = self.get_mongo_config()
+        # Set datetime_conversion to handle out-of-range dates
+        if 'datetime_conversion' not in mongo_config:
+            mongo_config['datetime_conversion'] = DatetimeConversion.DATETIME_AUTO
+        client = MongoClient(**mongo_config)
 
         try:
             self.user_logger.info("Connecting to MongoDB...")

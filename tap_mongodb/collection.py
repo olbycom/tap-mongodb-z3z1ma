@@ -10,6 +10,7 @@ from functools import cached_property
 from typing import Any, Generator, Iterable
 
 import nekt_singer_sdk.singerlib as singer
+from bson.datetime_ms import DatetimeMS
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
 from nekt_singer_sdk import Stream
@@ -99,6 +100,9 @@ class CollectionStream(Stream):
 
     def _handle_unusual_types(self, obj):
         if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        elif isinstance(obj, DatetimeMS):
+            # Handle out-of-range dates from DATETIME_AUTO conversion
             return obj.isoformat()
         elif isinstance(obj, ObjectId):
             return str(obj)
