@@ -1,0 +1,58 @@
+{
+  "meltano": {
+    "name": "tap-mongodb",
+    "variant": "z3z1ma",
+    "pip_url": "-e ./extract/tap-mongodb",
+    "executable": "tap-mongodb",
+    "capabilities": ["state", "catalog", "discover"]
+  },
+  "connectors": [
+    {
+      "connector_slug": "mongodb",
+      "config_template": {
+        "type": "object",
+        "required": ["mongo"],
+        "properties": {
+          "mongo": {
+            "type": "object",
+            "order": 1,
+            "format": "parent",
+            "el_type": "extractor",
+            "required": ["host"],
+            "properties": {
+              "host": {
+                "type": "string",
+                "order": 2,
+                "title": "Host",
+                "el_type": "extractor",
+                "docs_url": "https://www.mongodb.com/docs/manual/reference/connection-string/",
+                "description": "The full connection URL of your MongoDB database.",
+                "placeholder": "mongodb+srv://user:password@cluster0.example.mongodb.net/?retryWrites=true&w=majority"
+              }
+            }
+          },
+          "database_includes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "order": 2,
+            "title": "List of databases to include",
+            "el_type": "extractor",
+            "description": "A list of databases names to include in the discovery process. If this list is empty, all databases available on your MongoDB instance will be included.",
+            "advanced_settings": true
+          },
+          "batch_size": {
+            "type": "integer",
+            "order": 3,
+            "title": "Batch size",
+            "el_type": "extractor",
+            "description": "The number of documents to fetch in a single batch. Setting this to a smaller number helps reduce the overload on the system, although the extraction time will be higher.",
+            "placeholder": 1000,
+            "advanced_settings": true
+          }
+        }
+      }
+    }
+  ]
+}

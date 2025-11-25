@@ -1,7 +1,0 @@
-{
-  "name": "tap-mongodb",
-  "variant": "z3z1ma",
-  "pip_url": "-e ./extract/tap-mongodb",
-  "executable": "tap-mongodb",
-  "capabilities": ["state", "catalog", "discover"]
-}
