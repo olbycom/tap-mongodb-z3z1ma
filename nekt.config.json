@@ -4,21 +4,29 @@
     "variant": "z3z1ma",
     "pip_url": "-e ./extract/tap-mongodb",
     "executable": "tap-mongodb",
-    "capabilities": ["state", "catalog", "discover"]
+    "capabilities": [
+      "state",
+      "catalog",
+      "discover"
+    ]
   },
   "connectors": [
     {
       "connector_slug": "mongodb",
       "config_template": {
         "type": "object",
-        "required": ["mongo"],
+        "required": [
+          "mongo"
+        ],
         "properties": {
           "mongo": {
             "type": "object",
             "order": 1,
             "format": "parent",
             "el_type": "extractor",
-            "required": ["host"],
+            "required": [
+              "host"
+            ],
             "properties": {
               "host": {
                 "type": "string",
@@ -49,6 +57,15 @@
             "el_type": "extractor",
             "description": "The number of documents to fetch in a single batch. Setting this to a smaller number helps reduce the overload on the system, although the extraction time will be higher.",
             "placeholder": 1000,
+            "advanced_settings": true
+          },
+          "cdc_append_mode": {
+            "type": "boolean",
+            "order": 4,
+            "default": false,
+            "title": "CDC append mode",
+            "el_type": "extractor",
+            "description": "When enabled for LOG_BASED replication, uses _sdc_lsn as the _id field to make each change event unique. Also sets _sdc_deleted_at to null for all operations. Useful for downstream consumers that need to track every change as a separate event.",
             "advanced_settings": true
           }
         }
