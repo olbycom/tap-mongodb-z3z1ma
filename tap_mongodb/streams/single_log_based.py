@@ -320,6 +320,7 @@ class MongoDBSingleLogBasedStream(Stream):
         """Handle insert operation from change stream."""
         document = change["fullDocument"]
         resume_token = change["_id"]
+        cluster_time = change.get("clusterTime")
 
         # Get the stream to process the document
         stream = [s for s in self.log_based_streams if s.name == stream_name][0]
@@ -335,8 +336,10 @@ class MongoDBSingleLogBasedStream(Stream):
             if stream.replication_key in document:
                 record[stream.replication_key] = document[stream.replication_key]
 
-        # Add _sdc columns
+        # Add _sdc columns (aligned with tap-mysql CDC columns)
         record["_sdc_lsn"] = json_util.dumps(resume_token)
+        record["_sdc_operation"] = "INSERT"
+        record["_sdc_event_timestamp"] = cluster_time.as_datetime().isoformat() if cluster_time else None
         record["_sdc_deleted_at"] = None
 
         return record
@@ -349,6 +352,7 @@ class MongoDBSingleLogBasedStream(Stream):
         """Handle update operation from change stream."""
         document = change["fullDocument"]
         resume_token = change["_id"]
+        cluster_time = change.get("clusterTime")
 
         # Get the stream to process the document
         stream = [s for s in self.log_based_streams if s.name == stream_name][0]
@@ -364,8 +368,10 @@ class MongoDBSingleLogBasedStream(Stream):
             if stream.replication_key in document:
                 record[stream.replication_key] = document[stream.replication_key]
 
-        # Add _sdc columns
+        # Add _sdc columns (aligned with tap-mysql CDC columns)
         record["_sdc_lsn"] = json_util.dumps(resume_token)
+        record["_sdc_operation"] = "UPDATE"
+        record["_sdc_event_timestamp"] = cluster_time.as_datetime().isoformat() if cluster_time else None
         record["_sdc_deleted_at"] = None
 
         return record
@@ -386,13 +392,12 @@ class MongoDBSingleLogBasedStream(Stream):
             "document": json.dumps({"_id": document_key["_id"]}, default=self._handle_unusual_types),
         }
 
-        # Add _sdc columns
+        # Add _sdc columns (aligned with tap-mysql CDC columns)
+        event_timestamp = cluster_time.as_datetime().isoformat() if cluster_time else None
         record["_sdc_lsn"] = json_util.dumps(resume_token)
-        # Use cluster time for deletion timestamp
-        if cluster_time:
-            record["_sdc_deleted_at"] = cluster_time.as_datetime().isoformat()
-        else:
-            record["_sdc_deleted_at"] = parser.parse("now").isoformat()
+        record["_sdc_operation"] = "DELETE"
+        record["_sdc_event_timestamp"] = event_timestamp
+        record["_sdc_deleted_at"] = event_timestamp or parser.parse("now").isoformat()
 
         return record
 

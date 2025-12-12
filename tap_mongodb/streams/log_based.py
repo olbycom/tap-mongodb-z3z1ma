@@ -55,17 +55,22 @@ class MongoDBLogBasedStream(Stream):
         if "required" in schema_dict:
             schema_dict.pop("required")
 
-        # Add _sdc columns
+        # Add _sdc columns (aligned with tap-mysql CDC columns)
         schema_dict["properties"].update({
             "_sdc_deleted_at": {
                 "type": ["string", "null"],
                 "format": "date-time"
-            }
-        })
-        schema_dict["properties"].update({
+            },
+            "_sdc_operation": {
+                "type": ["string", "null"]
+            },
+            "_sdc_event_timestamp": {
+                "type": ["string", "null"],
+                "format": "date-time"
+            },
             "_sdc_lsn": {
                 "type": ["string", "null"]
-            }
+            },
         })
 
         return schema_dict

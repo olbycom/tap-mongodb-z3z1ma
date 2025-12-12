@@ -11,7 +11,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-import nekt_singer_sdk.helpers._typing
 import nekt_singer_sdk.singerlib.messages
 import orjson
 import yaml
@@ -34,15 +33,6 @@ _BLANK = ""
 nekt_singer_sdk.singerlib.messages.format_message = lambda message: orjson.dumps(
     message.to_dict(), default=lambda o: str(o), option=orjson.OPT_OMIT_MICROSECONDS
 ).decode("utf-8")
-
-
-def noop(*args, **kwargs) -> None:
-    """No-op function to silence the warning about unmapped properties."""
-    pass
-
-
-# Monkey patch the singer lib to silence the warning about unmapped properties
-nekt_singer_sdk.helpers._typing._warn_unmapped_properties = noop
 
 
 class TapMongoDB(Tap):
@@ -217,6 +207,7 @@ class TapMongoDB(Tap):
                     schema=Schema.from_dict(schema.to_dict()),
                     database=db_name,
                     table=collection,
+                    replication_method=replication_method,
                 )
 
                 catalog_entries.append(catalog_entry)
@@ -255,6 +246,7 @@ class TapMongoDB(Tap):
                     stream_modified = True
                     new_entry.schema.required = None
 
+                # Add _sdc columns (aligned with tap-mysql CDC columns)
                 if "_sdc_deleted_at" not in new_entry.schema.properties:
                     stream_modified = True
                     new_entry.schema.properties.update({
@@ -262,6 +254,24 @@ class TapMongoDB(Tap):
                     })
                     new_entry.metadata.update({
                         ("properties", "_sdc_deleted_at"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)
+                    })
+
+                if "_sdc_operation" not in new_entry.schema.properties:
+                    stream_modified = True
+                    new_entry.schema.properties.update({
+                        "_sdc_operation": Schema(type=["string", "null"])
+                    })
+                    new_entry.metadata.update({
+                        ("properties", "_sdc_operation"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)
+                    })
+
+                if "_sdc_event_timestamp" not in new_entry.schema.properties:
+                    stream_modified = True
+                    new_entry.schema.properties.update({
+                        "_sdc_event_timestamp": Schema(type=["string", "null"], format="date-time")
+                    })
+                    new_entry.metadata.update({
+                        ("properties", "_sdc_event_timestamp"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)
                     })
 
                 if "_sdc_lsn" not in new_entry.schema.properties:
@@ -326,7 +336,8 @@ class TapMongoDB(Tap):
                     tap=self,
                     catalog_entry=entry,
                     name=entry.tap_stream_id,
-                    schema=entry.schema,
+                    # Don't pass schema here - let MongoDBLogBasedStream.schema property
+                    # handle it so _sdc columns are added dynamically
                 )
             else:
                 stream = CollectionStream(
