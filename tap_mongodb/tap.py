@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import json
 import os
@@ -18,12 +19,13 @@ from bson import Timestamp
 from bson.codec_options import DatetimeConversion
 from nekt_singer_sdk import Stream, Tap
 from nekt_singer_sdk import typing as th
-from nekt_singer_sdk.singerlib import MetadataMapping, Schema
+from nekt_singer_sdk.singerlib import Metadata, MetadataMapping, Schema, StateMessage
 from nekt_singer_sdk.singerlib.catalog import Catalog, CatalogEntry
 from nekt_singer_sdk.streams.core import REPLICATION_FULL_TABLE
 from pymongo.mongo_client import MongoClient
 
 from tap_mongodb.collection import CollectionStream
+from tap_mongodb.streams import MongoDBLogBasedStream, MongoDBSingleLogBasedStream
 
 _BLANK = ""
 """A sentinel value to represent a blank value in the config."""
@@ -225,6 +227,8 @@ class TapMongoDB(Tap):
     def catalog(self) -> Catalog:
         """Get the tap's working catalog.
 
+        Override to do LOG_BASED modifications.
+
         Returns:
             A Singer catalog object.
         """
@@ -232,8 +236,55 @@ class TapMongoDB(Tap):
         catalog: Catalog = Catalog()
         catalog_entries: list[CatalogEntry] = []
         catalog_entries.extend(self.discover_collections(tap_metadata))
+
+        modified_streams: list = []
         for entry in catalog_entries:
-            catalog.add_stream(entry=entry)
+            new_entry = copy.deepcopy(entry)
+            stream_modified = False
+
+            # If LOG_BASED, apply nullability and _sdc column logic
+            if new_entry.replication_method == "LOG_BASED" and new_entry.schema.properties:
+                for property in new_entry.schema.properties.values():
+                    if "null" not in property.type:
+                        if isinstance(property.type, list):
+                            property.type.append("null")
+                        else:
+                            property.type = [property.type, "null"]
+
+                if new_entry.schema.required:
+                    stream_modified = True
+                    new_entry.schema.required = None
+
+                if "_sdc_deleted_at" not in new_entry.schema.properties:
+                    stream_modified = True
+                    new_entry.schema.properties.update({
+                        "_sdc_deleted_at": Schema(type=["string", "null"], format="date-time")
+                    })
+                    new_entry.metadata.update({
+                        ("properties", "_sdc_deleted_at"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)
+                    })
+
+                if "_sdc_lsn" not in new_entry.schema.properties:
+                    stream_modified = True
+                    new_entry.schema.properties.update({
+                        "_sdc_lsn": Schema(type=["string", "null"])
+                    })
+                    new_entry.metadata.update({
+                        ("properties", "_sdc_lsn"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)
+                    })
+
+            if stream_modified:
+                modified_streams.append(new_entry.tap_stream_id)
+
+            catalog.add_stream(new_entry)
+
+        if modified_streams:
+            self.internal_logger.info(
+                "One or more LOG_BASED catalog entries were modified "
+                f"({modified_streams=}) to allow nullability and include _sdc columns. "
+                "See README for further information."
+            )
+
         return catalog
 
     def discover_streams(self) -> list[Stream]:  # type: ignore
@@ -256,14 +307,34 @@ class TapMongoDB(Tap):
             self.user_logger.error(f"Could not connect to MongoDB: {exc}")
             sys.exit(1)
 
+        # Store the client for use in sync operations
+        self.mongo_client = client
+
+        # Build a lookup of replication methods from the input catalog (meltano-provided)
+        # This is necessary because self.catalog is the discovered catalog, not the user's config
+        input_replication_methods = {}
+        if self.input_catalog:
+            for input_entry in self.input_catalog.streams:
+                input_replication_methods[input_entry.tap_stream_id] = input_entry.replication_method
+
         streams: list[Stream] = []
         for entry in self.catalog.streams:
-            stream = CollectionStream(
-                tap=self,
-                name=entry.tap_stream_id,
-                schema=entry.schema,
-                collection=client[entry.database][entry.table],
-            )
+            # Check the input catalog for the replication method, fallback to discovered entry
+            replication_method = input_replication_methods.get(entry.tap_stream_id, entry.replication_method)
+            if replication_method == "LOG_BASED":
+                stream = MongoDBLogBasedStream(
+                    tap=self,
+                    catalog_entry=entry,
+                    name=entry.tap_stream_id,
+                    schema=entry.schema,
+                )
+            else:
+                stream = CollectionStream(
+                    tap=self,
+                    name=entry.tap_stream_id,
+                    schema=entry.schema,
+                    collection=client[entry.database][entry.table],
+                )
             stream.apply_catalog(self.catalog)
             streams.append(stream)
 
@@ -274,6 +345,101 @@ class TapMongoDB(Tap):
             self.user_discovery_logger.error("No streams discovered, please check your configurations.")
 
         return streams
+
+    def _fast_forward_change_stream_position(self) -> None:
+        """Capture current change stream position before FULL_TABLE sync.
+
+        This ensures that when the user later switches to LOG_BASED replication,
+        the tap will resume from this position and not miss any changes that
+        occurred during or after the FULL_TABLE sync.
+        """
+        from bson import json_util
+
+        self.user_logger.info("Capturing change stream position before full sync...")
+
+        try:
+            # Get any collection to open a change stream
+            # We just need the current cluster time, any collection will do
+            for entry in self.catalog.streams:
+                if entry.database and entry.table:
+                    collection = self.mongo_client[entry.database][entry.table]
+                    with collection.watch(max_await_time_ms=1000) as stream:
+                        # Get the current resume token
+                        resume_token = stream.resume_token
+                        if resume_token:
+                            # Store in state under the single_log_based stream key
+                            identifier = json_util.dumps(resume_token)
+                            if "bookmarks" not in self.state:
+                                self.state["bookmarks"] = {}
+                            self.state["bookmarks"]["single_log_based"] = {
+                                "replication_key": "_sdc_lsn",
+                                "replication_key_value": identifier,
+                            }
+                            self.write_message(StateMessage(value=self.state))
+                            self.user_logger.info(
+                                "Change stream position captured. "
+                                "When you switch to LOG_BASED, sync will resume from this point."
+                            )
+                            return
+        except Exception as e:
+            self.internal_logger.warning(f"Could not capture change stream position: {e}")
+            # Non-fatal - continue with the sync
+
+    def sync_all(self) -> None:
+        """Sync all streams."""
+        self._reset_state_progress_markers()
+        self._set_compatible_replication_methods()
+        if self.state:
+            self.write_message(StateMessage(value=self.state))
+
+        log_based_streams = [
+            stream for stream in self.streams.values()
+            if stream.replication_method == "LOG_BASED"
+            and stream.selected
+            and isinstance(stream, MongoDBLogBasedStream)
+        ]
+        other_streams = [
+            stream for stream in self.streams.values()
+            if stream.replication_method != "LOG_BASED" and stream.selected
+        ]
+
+        if log_based_streams:
+            log_based_stream = MongoDBSingleLogBasedStream(
+                tap=self,
+                log_based_streams=log_based_streams,
+                mongo_client=self.mongo_client,
+            )
+            log_based_stream.sync()
+            log_based_stream.finalize_state_progress_markers()
+
+        # If running FULL_TABLE streams but no LOG_BASED streams are configured,
+        # fast-forward the change stream position BEFORE the full sync.
+        # This captures the current position so that when the user later switches
+        # to LOG_BASED, it will resume from this point and catch any changes
+        # that happened during or after the FULL_TABLE sync.
+        if other_streams and not log_based_streams:
+            self._fast_forward_change_stream_position()
+
+        for stream in other_streams:
+            if not stream.selected and not stream.has_selected_descendents:
+                self.logger.info("Skipping deselected stream '%s'.", stream.name)
+                continue
+
+            if stream.parent_stream_type:
+                self.logger.debug(
+                    "Child stream '%s' is expected to be called by parent stream '%s'. Skipping direct invocation.",
+                    type(stream).__name__,
+                    stream.parent_stream_type.__name__,
+                )
+                continue
+
+            stream.sync()
+            stream.finalize_state_progress_markers()
+
+        # this second loop is needed for all streams to print out their costs
+        # including child streams which are otherwise skipped in the loop above
+        for stream in self.streams.values():
+            stream.log_sync_costs()
 
     def get_replication_key_schema_type(
         self, sample_document: dict | None, stream_name: str, replication_key: str
