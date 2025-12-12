@@ -196,7 +196,9 @@ class TapMongoDB(Tap):
                     th.Property("document", th.StringType),
                 )
 
-                if replication_key and replication_key != "_id":  # in case it's _id, we already have it in the schema
+                # For LOG_BASED replication with _sdc_lsn, skip replication key lookup since
+                # _sdc_lsn is a synthetic column added by the CDC process, not a document field
+                if replication_key and replication_key != "_id" and replication_key != "_sdc_lsn":
                     replication_key_type = self.get_replication_key_schema_type(
                         client[db_name][collection].find_one({replication_key: {"$ne": None}}),
                         stream_name,
