@@ -62,6 +62,8 @@ class CollectionStream(Stream):
 
         if isinstance(doc.get(self.replication_key), int):
             return "integer"
+        elif isinstance(doc.get(self.replication_key), str):
+            return "string"
         elif isinstance(doc.get(self.replication_key), datetime.datetime):
             return "datetime"
         elif isinstance(doc.get(self.replication_key), Timestamp):
@@ -130,7 +132,7 @@ class CollectionStream(Stream):
         if not bookmark:
             return None
 
-        if self.replication_key_mongo_type == "integer":
+        if self.replication_key_mongo_type == "integer" or self.replication_key_mongo_type == "string":
             return bookmark
         elif self.replication_key_mongo_type == "datetime":
             return datetime.datetime.fromisoformat(bookmark)
