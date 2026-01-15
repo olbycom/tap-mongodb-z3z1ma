@@ -305,6 +305,13 @@ class TapMongoDB(Tap):
                             )
                         }
                     )
+                    new_stream.metadata.update(
+                        {
+                            ("properties", new_stream.replication_key): Metadata(
+                                Metadata.InclusionType.AVAILABLE, True, None
+                            )
+                        }
+                    )
 
             # If LOG_BASED, apply nullability and _sdc column logic
             if new_stream.replication_method == "LOG_BASED" and new_stream.schema.properties:
