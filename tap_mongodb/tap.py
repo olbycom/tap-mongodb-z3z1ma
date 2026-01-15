@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import copy
 import datetime
-import json
-import os
 import sys
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nekt_singer_sdk.singerlib.messages
 import orjson
@@ -25,6 +23,9 @@ from pymongo.mongo_client import MongoClient
 
 from tap_mongodb.collection import CollectionStream
 from tap_mongodb.streams import MongoDBLogBasedStream, MongoDBSingleLogBasedStream
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _BLANK = ""
 """A sentinel value to represent a blank value in the config."""
@@ -108,6 +109,10 @@ class TapMongoDB(Tap):
         ),
     ).to_dict()
 
+    def __init__(self, *args, **kwargs):
+        self._catalog_dict: dict[str, list[dict]] | None = None
+        super().__init__(*args, **kwargs)
+
     def get_mongo_config(self) -> dict[str, Any]:
         mongo_file_location = self.config.get("mongo_file_location", _BLANK)
 
@@ -122,111 +127,28 @@ class TapMongoDB(Tap):
 
         return self.config["mongo"]
 
-    def _extract_metadata_from_env(self) -> dict[str, dict[str, Any]]:
-        """Extract metadata from environment variables.
-
-        Meltano 4+ uses individual env vars like:
-        TAP_MONGODB__METADATA_SAMPLE_MFLIX_MOVIES_REPLICATION_METHOD=INCREMENTAL
-        TAP_MONGODB__METADATA_SAMPLE_MFLIX_MOVIES_REPLICATION_KEY=lastupdated
-
-        Older Meltano versions used a single JSON env var:
-        TAP_MONGODB_METADATA='{"stream": {"replication-key": "..."}}'
-
-        Returns:
-            Dictionary mapping stream names to their metadata settings.
-        """
-        tap_metadata: dict[str, dict[str, Any]] = {}
-
-        # Check Meltano version to determine which format to use
-        meltano_version = os.environ.get("MELTANO_USER_AGENT", "")
-        # Extract version number (e.g., "Meltano/4.0.7" -> "4.0.7")
-        version_str = meltano_version.split("/")[-1] if "/" in meltano_version else ""
-
-        try:
-            major_version = int(version_str.split(".")[0]) if version_str else 0
-        except (ValueError, IndexError):
-            major_version = 0
-
-        self.logger.info(f"Detected Meltano version: {meltano_version} (major: {major_version})")
-
-        # Meltano 4+ uses individual environment variables
-        if major_version >= 4:
-            metadata_prefix = f"{self._env_var_prefix}_METADATA_"
-
-            # Known metadata setting suffixes (in uppercase with underscores)
-            known_settings = [
-                "REPLICATION_METHOD",
-                "REPLICATION_KEY",
-                "SELECTED",
-                "SELECTED_BY_DEFAULT",
-            ]
-
-            for env_key, env_value in os.environ.items():
-                if env_key.startswith(metadata_prefix):
-                    # Extract the remainder after the metadata prefix
-                    # Format: {STREAM_NAME}_{SETTING_NAME}
-                    remainder = env_key[len(metadata_prefix) :]
-
-                    # Try to match known setting suffixes
-                    stream_name = None
-                    setting_name = None
-
-                    for known_setting in known_settings:
-                        if remainder.endswith(f"_{known_setting}"):
-                            # Extract stream name by removing the setting suffix
-                            stream_name_upper = remainder[: -len(known_setting) - 1]
-                            stream_name = stream_name_upper.lower()
-                            setting_name = known_setting
-                            break
-
-                    if not stream_name or not setting_name:
-                        self.logger.debug(f"Skipping unknown metadata env var: {env_key}")
-                        continue
-
-                    # Convert setting name to lowercase with hyphens (Singer spec format)
-                    # REPLICATION_METHOD -> replication-method
-                    setting_key = setting_name.lower().replace("_", "-")
-
-                    # Initialize stream metadata if not exists
-                    if stream_name not in tap_metadata:
-                        tap_metadata[stream_name] = {}
-
-                    tap_metadata[stream_name][setting_key] = env_value
-
-            if tap_metadata:
-                self.logger.info(f"Extracted metadata from Meltano 4+ env vars: {tap_metadata}")
-
-        # Fallback to old format (Meltano < 4 or if no metadata found)
-        if not tap_metadata:
-            old_format_key = f"{self._env_var_prefix}_METADATA"
-            if old_format_key in os.environ:
-                try:
-                    tap_metadata = json.loads(os.environ[old_format_key])
-                    self.logger.info(f"Extracted metadata from legacy format: {tap_metadata}")
-                except json.JSONDecodeError as e:
-                    self.logger.warning(f"Failed to parse legacy metadata from {old_format_key}: {e}")
-
-        if not tap_metadata:
-            self.logger.info("No metadata found in environment variables")
-
-        return tap_metadata
+    @property
+    def mongo_client(self) -> MongoClient:
+        """Get the MongoDB client."""
+        if not hasattr(self, "_mongo_client"):
+            mongo_config = self.get_mongo_config()
+            # Set datetime_conversion to handle out-of-range dates
+            if "datetime_conversion" not in mongo_config:
+                mongo_config["datetime_conversion"] = DatetimeConversion.DATETIME_AUTO
+            self._mongo_client = MongoClient(**mongo_config)
+        return self._mongo_client
 
     def discover_collections(
         self,
-        tap_metadata: dict,
+        # tap_metadata: dict,
     ) -> list[CatalogEntry]:
-        mongo_config = self.get_mongo_config()
-        # Set datetime_conversion to handle out-of-range dates
-        if "datetime_conversion" not in mongo_config:
-            mongo_config["datetime_conversion"] = DatetimeConversion.DATETIME_AUTO
-        client = MongoClient(**mongo_config)
 
         db_includes = self.config.get("database_includes", [])
         db_excludes = self.config.get("database_excludes", [])
 
         catalog_entries = []
         self.user_discovery_logger.info("Discovering databases...")
-        databases = client.list_database_names()
+        databases = self.mongo_client.list_database_names()
         if databases:
             db_list = "\n\t- " + "\n\t- ".join(databases)
             self.user_discovery_logger.info(f"Discovered databases ({len(databases)}): {db_list}")
@@ -247,7 +169,7 @@ class TapMongoDB(Tap):
                 continue
             try:
                 self.user_discovery_logger.info(f"Discovering collections for database '{db_name}'...")
-                collections = client[db_name].list_collection_names()
+                collections = self.mongo_client[db_name].list_collection_names()
             except Exception:
                 self.user_discovery_logger.warning(
                     f"Skipping database '{db_name}', authenticated user does not have permission to access."
@@ -265,7 +187,7 @@ class TapMongoDB(Tap):
 
             for collection in collections:
                 try:
-                    client[db_name][collection].find_one()
+                    self.mongo_client[db_name][collection].find_one()
                 except Exception:
                     self.user_discovery_logger.warning(
                         f"Skipping collection '{collection}', authenticated user does not have permission to access.",
@@ -286,14 +208,14 @@ class TapMongoDB(Tap):
                 replication_method: str = REPLICATION_FULL_TABLE
 
                 try:
-                    replication_key: str | None = self.streams.get(stream_name).replication_key
-                    replication_method: str = self.streams.get(stream_name).replication_method
+                    replication_key: str | None = self.input_catalog.get(stream_name).replication_key
+                    replication_method: str = self.input_catalog.get(stream_name).replication_method
 
                     # For LOG_BASED replication with _sdc_lsn, skip replication key lookup since
                     # _sdc_lsn is a synthetic column added by the CDC process, not a document field
                     if replication_key and replication_key != "_id" and replication_key != "_sdc_lsn":
                         replication_key_type = self.get_replication_key_schema_type(
-                            client[db_name][collection].find_one({replication_key: {"$ne": None}}),
+                            self.mongo_client[db_name][collection].find_one({replication_key: {"$ne": None}}),
                             stream_name,
                             replication_key,
                         )
@@ -307,6 +229,9 @@ class TapMongoDB(Tap):
                     selected_by_default=True,
                 )
 
+                if replication_key:
+                    metadata[()].replication_key = replication_key
+
                 catalog_entry = CatalogEntry(
                     tap_stream_id=stream_name,
                     stream=stream_name,
@@ -319,9 +244,38 @@ class TapMongoDB(Tap):
                     replication_key=replication_key,
                 )
 
-                catalog_entries.append(catalog_entry)
+                catalog_entries.append(catalog_entry.to_dict())
 
         return catalog_entries
+
+    @property
+    def mongo_catalog_entries(self) -> MongoClient:
+        """Get the MongoDB client."""
+        if not hasattr(self, "_mongo_catalog_entries"):
+            catalog_entries = self.discover_collections()
+            self._mongo_catalog_entries = {
+                catalog_entry["tap_stream_id"]: catalog_entry for catalog_entry in catalog_entries
+            }
+        return self._mongo_catalog_entries
+
+    def retrieve_collection(self, catalog_entry: CatalogEntry) -> Any:
+        """Retrieve a single collection from CatalogEntry."""
+        entry = self.mongo_catalog_entries[catalog_entry["tap_stream_id"]]
+        return self.mongo_client[entry["database_name"]][entry["table_name"]]
+
+    @property
+    def catalog_dict(self) -> dict:
+        if self._catalog_dict:
+            return self._catalog_dict
+
+        if self.input_catalog:
+            return self.input_catalog.to_dict()
+
+        result: dict[str, list[dict]] = {"streams": []}
+        result["streams"].extend(self.discover_collections())
+
+        self._catalog_dict: dict = result
+        return self._catalog_dict
 
     @cached_property
     def catalog(self) -> Catalog:
@@ -332,68 +286,76 @@ class TapMongoDB(Tap):
         Returns:
             A Singer catalog object.
         """
-        # Extract metadata from environment variables (supports Meltano 4+ and legacy formats)
-        tap_metadata = self._extract_metadata_from_env()
-
-        catalog: Catalog = Catalog()
-        catalog_entries: list[CatalogEntry] = []
-        catalog_entries.extend(self.discover_collections(tap_metadata))
-
+        new_catalog: Catalog = Catalog()
         modified_streams: list = []
-        for entry in catalog_entries:
-            new_entry = copy.deepcopy(entry)
+        for stream in super().catalog.streams:
             stream_modified = False
+            new_stream = copy.deepcopy(stream)
+
+            # If incremental stream
+            if new_stream.replication_method == "INCREMENTAL" and new_stream.schema.properties:
+                if new_stream.replication_key not in new_stream.schema.properties:
+                    # Add replication key to schema if missing
+                    entry = self.mongo_catalog_entries[new_stream.tap_stream_id]
+                    stream_modified = True
+                    new_stream.schema.properties.update(
+                        {
+                            new_stream.replication_key: Schema(
+                                **entry.get("schema").get("properties").get(new_stream.replication_key)
+                            )
+                        }
+                    )
 
             # If LOG_BASED, apply nullability and _sdc column logic
-            if new_entry.replication_method == "LOG_BASED" and new_entry.schema.properties:
-                for property in new_entry.schema.properties.values():
+            if new_stream.replication_method == "LOG_BASED" and new_stream.schema.properties:
+                for property in new_stream.schema.properties.values():
                     if "null" not in property.type:
                         if isinstance(property.type, list):
                             property.type.append("null")
                         else:
                             property.type = [property.type, "null"]
 
-                if new_entry.schema.required:
+                if new_stream.schema.required:
                     stream_modified = True
-                    new_entry.schema.required = None
+                    new_stream.schema.required = None
 
                 # Add _sdc columns (aligned with tap-mysql CDC columns)
-                if "_sdc_deleted_at" not in new_entry.schema.properties:
+                if "_sdc_deleted_at" not in new_stream.schema.properties:
                     stream_modified = True
-                    new_entry.schema.properties.update(
+                    new_stream.schema.properties.update(
                         {"_sdc_deleted_at": Schema(type=["string", "null"], format="date-time")}
                     )
-                    new_entry.metadata.update(
+                    new_stream.metadata.update(
                         {("properties", "_sdc_deleted_at"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-                if "_sdc_operation" not in new_entry.schema.properties:
+                if "_sdc_operation" not in new_stream.schema.properties:
                     stream_modified = True
-                    new_entry.schema.properties.update({"_sdc_operation": Schema(type=["string", "null"])})
-                    new_entry.metadata.update(
+                    new_stream.schema.properties.update({"_sdc_operation": Schema(type=["string", "null"])})
+                    new_stream.metadata.update(
                         {("properties", "_sdc_operation"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-                if "_sdc_event_timestamp" not in new_entry.schema.properties:
+                if "_sdc_event_timestamp" not in new_stream.schema.properties:
                     stream_modified = True
-                    new_entry.schema.properties.update(
+                    new_stream.schema.properties.update(
                         {"_sdc_event_timestamp": Schema(type=["string", "null"], format="date-time")}
                     )
-                    new_entry.metadata.update(
+                    new_stream.metadata.update(
                         {("properties", "_sdc_event_timestamp"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-                if "_sdc_lsn" not in new_entry.schema.properties:
+                if "_sdc_lsn" not in new_stream.schema.properties:
                     stream_modified = True
-                    new_entry.schema.properties.update({"_sdc_lsn": Schema(type=["string", "null"])})
-                    new_entry.metadata.update(
+                    new_stream.schema.properties.update({"_sdc_lsn": Schema(type=["string", "null"])})
+                    new_stream.metadata.update(
                         {("properties", "_sdc_lsn"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
             if stream_modified:
-                modified_streams.append(new_entry.tap_stream_id)
+                modified_streams.append(new_stream.tap_stream_id)
 
-            catalog.add_stream(new_entry)
+            new_catalog.add_stream(new_stream)
 
         if modified_streams:
             self.internal_logger.info(
@@ -401,60 +363,33 @@ class TapMongoDB(Tap):
                 f"({modified_streams=}) to allow nullability and include _sdc columns. "
                 "See README for further information."
             )
+        return new_catalog
 
-        return catalog
+    @property
+    def streams(self) -> dict[str, Stream]:
+        if self._streams is None:
+            self._streams = {}
 
-    def discover_streams(self) -> list[Stream]:  # type: ignore
-        """Return a list of discovered streams."""
-        self.user_discovery_logger.info("Discovering streams...")
+            for stream in self.load_streams():
+                if self.catalog is not None:
+                    stream.apply_catalog(self.catalog)
+                self._streams[stream.name] = stream
+        return self._streams
 
-        mongo_config = self.get_mongo_config()
-        # Set datetime_conversion to handle out-of-range dates
-        if "datetime_conversion" not in mongo_config:
-            mongo_config["datetime_conversion"] = DatetimeConversion.DATETIME_AUTO
-        client = MongoClient(**mongo_config)
-
-        try:
-            self.user_logger.info("Connecting to MongoDB...")
-            info = client.server_info()
-            self.user_logger.info(
-                "Connected to MongoDB" + (f" (v{info.get('version')})." if info.get("version") else ".")
-            )
-        except Exception as exc:
-            self.user_logger.error(f"Could not connect to MongoDB: {exc}")
-            sys.exit(1)
-
-        # Store the client for use in sync operations
-        self.mongo_client = client
-
-        # Build a lookup of replication methods from the input catalog (meltano-provided)
-        # This is necessary because self.catalog is the discovered catalog, not the user's config
-        input_replication_methods = {}
-        if self.input_catalog:
-            for input_entry in self.input_catalog.streams:
-                input_replication_methods[input_entry.tap_stream_id] = input_entry.replication_method
-
+    def discover_streams(self) -> Sequence[Stream]:
         streams: list[Stream] = []
-        for entry in self.catalog.streams:
-            # Check the input catalog for the replication method, fallback to discovered entry
-            replication_method = input_replication_methods.get(entry.tap_stream_id, entry.replication_method)
-            if replication_method == "LOG_BASED":
-                stream = MongoDBLogBasedStream(
-                    tap=self,
-                    catalog_entry=entry,
-                    name=entry.tap_stream_id,
-                    # Don't pass schema here - let MongoDBLogBasedStream.schema property
-                    # handle it so _sdc columns are added dynamically
-                )
+        for catalog_entry in self.catalog_dict["streams"]:
+            if catalog_entry["replication_method"] == "LOG_BASED":
+                streams.append(MongoDBLogBasedStream(self, catalog_entry))
             else:
-                stream = CollectionStream(
-                    tap=self,
-                    name=entry.tap_stream_id,
-                    schema=entry.schema,
-                    collection=client[entry.database][entry.table],
+                streams.append(
+                    CollectionStream(
+                        self,
+                        name=catalog_entry.get("tap_stream_id"),
+                        schema=catalog_entry.get("schema"),
+                        collection=self.retrieve_collection(catalog_entry),
+                    )
                 )
-            stream.apply_catalog(self.catalog)
-            streams.append(stream)
 
         if streams:
             stream_list = "\n\t- " + "\n\t- ".join([stream.name for stream in streams])
