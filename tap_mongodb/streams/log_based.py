@@ -33,8 +33,8 @@ class MongoDBLogBasedStream(Stream):
         # it may access the schema property which uses _catalog_entry
         self._catalog_entry = catalog_entry
         # Store database and table from catalog entry for change stream filtering
-        self.database = catalog_entry.database
-        self.table = catalog_entry.table
+        self.database = catalog_entry["database"]
+        self.table = catalog_entry["table"]
         super().__init__(tap=tap, schema=schema, name=name)
 
     @functools.cached_property
