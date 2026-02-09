@@ -33,15 +33,16 @@ class MongoDBLogBasedStream(Stream):
         # it may access the schema property which uses _catalog_entry
         self._catalog_entry = catalog_entry
         # Store database and table from catalog entry for change stream filtering
-        self.database = catalog_entry["database"]
-        self.table = catalog_entry["table"]
+        self.database = catalog_entry["database_name"]
+        self.table = catalog_entry["table_name"]
+        name = name or catalog_entry["tap_stream_id"]
         super().__init__(tap=tap, schema=schema, name=name)
 
     @functools.cached_property
     def schema(self) -> dict:
         """Override schema for log-based replication adding _sdc columns."""
         # Use the stored catalog entry's schema to avoid circular references
-        schema_dict = cast(dict, self._catalog_entry.schema.to_dict())
+        schema_dict = self._catalog_entry.get("schema", {})
 
         # Ensure all properties are nullable for log-based replication
         for property in schema_dict["properties"].values():
