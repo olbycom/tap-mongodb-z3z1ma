@@ -39,7 +39,6 @@ class MongoDBSingleLogBasedStream(Stream):
         tap: "Tap",
         log_based_streams: list["MongoDBLogBasedStream"] = [],
         mongo_client: MongoClient | None = None,
-        cdc_append_mode: bool = False,
     ):
         super().__init__(
             tap=tap,
@@ -48,7 +47,6 @@ class MongoDBSingleLogBasedStream(Stream):
         )
         self.log_based_streams = log_based_streams
         self.mongo_client = mongo_client
-        self.cdc_append_mode = cdc_append_mode
 
     @functools.cached_property
     def schema(self) -> dict:
@@ -331,9 +329,8 @@ class MongoDBSingleLogBasedStream(Stream):
         sdc_lsn = json_util.dumps(resume_token)
 
         # Create the record similar to CollectionStream
-        # If cdc_append_mode is enabled, use the _data value from resume_token as _id for uniqueness
         record = {
-            "_id": resume_token.get("_data") if self.cdc_append_mode else str(document["_id"]),
+            "_id": str(document["_id"]),
             "document": json.dumps(document, default=self._handle_unusual_types),
         }
 
@@ -345,7 +342,6 @@ class MongoDBSingleLogBasedStream(Stream):
         record["_sdc_lsn"] = sdc_lsn
         record["_sdc_operation"] = "INSERT"
         record["_sdc_event_timestamp"] = cluster_time.as_datetime().isoformat() if cluster_time else None
-        # When cdc_append_mode is enabled, always set _sdc_deleted_at to null
         record["_sdc_deleted_at"] = None
 
         return record
@@ -367,9 +363,8 @@ class MongoDBSingleLogBasedStream(Stream):
         sdc_lsn = json_util.dumps(resume_token)
 
         # Create the record similar to CollectionStream
-        # If cdc_append_mode is enabled, use the _data value from resume_token as _id for uniqueness
         record = {
-            "_id": resume_token.get("_data") if self.cdc_append_mode else str(document["_id"]),
+            "_id": str(document["_id"]),
             "document": json.dumps(document, default=self._handle_unusual_types),
         }
 
@@ -381,7 +376,6 @@ class MongoDBSingleLogBasedStream(Stream):
         record["_sdc_lsn"] = sdc_lsn
         record["_sdc_operation"] = "UPDATE"
         record["_sdc_event_timestamp"] = cluster_time.as_datetime().isoformat() if cluster_time else None
-        # When cdc_append_mode is enabled, always set _sdc_deleted_at to null
         record["_sdc_deleted_at"] = None
 
         return record
@@ -401,17 +395,15 @@ class MongoDBSingleLogBasedStream(Stream):
         event_timestamp = cluster_time.as_datetime().isoformat() if cluster_time else None
 
         # For deletes, we only have the _id
-        # If cdc_append_mode is enabled, use the _data value from resume_token as _id for uniqueness
         record = {
-            "_id": resume_token.get("_data") if self.cdc_append_mode else str(document_key["_id"]),
+            "_id": str(document_key["_id"]),
             "document": json.dumps({"_id": document_key["_id"]}, default=self._handle_unusual_types),
         }
 
         record["_sdc_lsn"] = sdc_lsn
         record["_sdc_operation"] = "DELETE"
         record["_sdc_event_timestamp"] = event_timestamp
-        # When cdc_append_mode is enabled, set _sdc_deleted_at to null; otherwise use event timestamp
-        record["_sdc_deleted_at"] = None if self.cdc_append_mode else (event_timestamp or parser.parse("now").isoformat())
+        record["_sdc_deleted_at"] = event_timestamp
 
         return record
 

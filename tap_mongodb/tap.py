@@ -96,17 +96,6 @@ class TapMongoDB(Tap):
         th.Property("stream_maps", th.ObjectType()),
         th.Property("stream_map_config", th.ObjectType()),
         th.Property("batch_config", th.ObjectType()),
-        th.Property(
-            "cdc_append_mode",
-            th.BooleanType,
-            description=(
-                "When enabled for LOG_BASED replication, uses _sdc_lsn as the _id field "
-                "to make each change event unique. Also sets _sdc_deleted_at to null for "
-                "all operations. Useful for downstream consumers that need to track every "
-                "change as a separate event."
-            ),
-            default=False,
-        ),
     ).to_dict()
 
     def __init__(self, *args, **kwargs):
@@ -468,7 +457,6 @@ class TapMongoDB(Tap):
                 tap=self,
                 log_based_streams=log_based_streams,
                 mongo_client=self.mongo_client,
-                cdc_append_mode=self.config.get("cdc_append_mode", False),
             )
             log_based_stream.sync()
             log_based_stream.finalize_state_progress_markers()
