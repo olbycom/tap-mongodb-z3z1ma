@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import datetime
 import sys
 from functools import cached_property
@@ -175,14 +174,6 @@ class TapMongoDB(Tap):
                 continue
 
             for collection in collections:
-                try:
-                    self.mongo_client[db_name][collection].find_one()
-                except Exception:
-                    self.user_discovery_logger.warning(
-                        f"Skipping collection '{collection}', authenticated user does not have permission to access.",
-                    )
-                    continue
-
                 stream_prefix = self.config.get("stream_prefix", _BLANK)
                 stream_prefix += db_name.replace("-", "_").replace(".", "_")
                 stream_name = f"{stream_prefix}_{collection}"
@@ -209,7 +200,7 @@ class TapMongoDB(Tap):
                             replication_key,
                         )
                         schema.append(th.Property(replication_key, replication_key_type))
-                except Exception as e:
+                except Exception:
                     pass
 
                 metadata = MetadataMapping.get_standard_metadata(
@@ -275,91 +266,88 @@ class TapMongoDB(Tap):
         Returns:
             A Singer catalog object.
         """
-        new_catalog: Catalog = Catalog()
-        modified_streams: list = []
-        for stream in super().catalog.streams:
-            stream_modified = False
-            new_stream = copy.deepcopy(stream)
+        base_catalog = super().catalog
+        modified_count = 0
+        for stream in base_catalog.streams:
+            modified = False
 
             # If incremental stream
-            if new_stream.replication_method == "INCREMENTAL" and new_stream.schema.properties:
-                if new_stream.replication_key not in new_stream.schema.properties:
+            if stream.replication_method == "INCREMENTAL" and stream.schema.properties:
+                if stream.replication_key not in stream.schema.properties:
                     # Add replication key to schema if missing
-                    entry = self.mongo_catalog_entries[new_stream.tap_stream_id]
-                    stream_modified = True
-                    new_stream.schema.properties.update(
+                    entry = self.mongo_catalog_entries[stream.tap_stream_id]
+                    modified = True
+                    stream.schema.properties.update(
                         {
-                            new_stream.replication_key: Schema(
-                                **entry.get("schema").get("properties").get(new_stream.replication_key)
+                            stream.replication_key: Schema(
+                                **entry.get("schema").get("properties").get(stream.replication_key)
                             )
                         }
                     )
-                    new_stream.metadata.update(
+                    stream.metadata.update(
                         {
-                            ("properties", new_stream.replication_key): Metadata(
+                            ("properties", stream.replication_key): Metadata(
                                 Metadata.InclusionType.AVAILABLE, True, None
                             )
                         }
                     )
 
             # If LOG_BASED, apply nullability and _sdc column logic
-            if new_stream.replication_method == "LOG_BASED" and new_stream.schema.properties:
-                for property in new_stream.schema.properties.values():
+            if stream.replication_method == "LOG_BASED" and stream.schema.properties:
+                for property in stream.schema.properties.values():
                     if "null" not in property.type:
                         if isinstance(property.type, list):
                             property.type.append("null")
                         else:
                             property.type = [property.type, "null"]
 
-                if new_stream.schema.required:
-                    stream_modified = True
-                    new_stream.schema.required = None
+                if stream.schema.required:
+                    modified = True
+                    stream.schema.required = None
 
                 # Add _sdc columns (aligned with tap-mysql CDC columns)
-                if "_sdc_deleted_at" not in new_stream.schema.properties:
-                    stream_modified = True
-                    new_stream.schema.properties.update(
+                if "_sdc_deleted_at" not in stream.schema.properties:
+                    modified = True
+                    stream.schema.properties.update(
                         {"_sdc_deleted_at": Schema(type=["string", "null"], format="date-time")}
                     )
-                    new_stream.metadata.update(
+                    stream.metadata.update(
                         {("properties", "_sdc_deleted_at"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-                if "_sdc_operation" not in new_stream.schema.properties:
-                    stream_modified = True
-                    new_stream.schema.properties.update({"_sdc_operation": Schema(type=["string", "null"])})
-                    new_stream.metadata.update(
+                if "_sdc_operation" not in stream.schema.properties:
+                    modified = True
+                    stream.schema.properties.update({"_sdc_operation": Schema(type=["string", "null"])})
+                    stream.metadata.update(
                         {("properties", "_sdc_operation"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-                if "_sdc_event_timestamp" not in new_stream.schema.properties:
-                    stream_modified = True
-                    new_stream.schema.properties.update(
+                if "_sdc_event_timestamp" not in stream.schema.properties:
+                    modified = True
+                    stream.schema.properties.update(
                         {"_sdc_event_timestamp": Schema(type=["string", "null"], format="date-time")}
                     )
-                    new_stream.metadata.update(
+                    stream.metadata.update(
                         {("properties", "_sdc_event_timestamp"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-                if "_sdc_lsn" not in new_stream.schema.properties:
-                    stream_modified = True
-                    new_stream.schema.properties.update({"_sdc_lsn": Schema(type=["string", "null"])})
-                    new_stream.metadata.update(
+                if "_sdc_lsn" not in stream.schema.properties:
+                    modified = True
+                    stream.schema.properties.update({"_sdc_lsn": Schema(type=["string", "null"])})
+                    stream.metadata.update(
                         {("properties", "_sdc_lsn"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
                     )
 
-            if stream_modified:
-                modified_streams.append(new_stream.tap_stream_id)
+            if modified:
+                modified_count += 1
 
-            new_catalog.add_stream(new_stream)
-
-        if modified_streams:
+        if modified_count:
             self.internal_logger.info(
-                "One or more LOG_BASED catalog entries were modified "
-                f"({modified_streams=}) to allow nullability and include _sdc columns. "
+                f"{modified_count} LOG_BASED catalog entries were modified "
+                "to allow nullability and include _sdc columns. "
                 "See README for further information."
             )
-        return new_catalog
+        return base_catalog
 
     @property
     def streams(self) -> dict[str, Stream]:
@@ -388,8 +376,12 @@ class TapMongoDB(Tap):
                 )
 
         if streams:
-            stream_list = "\n\t- " + "\n\t- ".join([stream.name for stream in streams])
-            self.user_discovery_logger.info(f"Discovered streams ({len(streams)}): {stream_list}")
+            if len(streams) <= 20:
+                stream_list = "\n\t- " + "\n\t- ".join([stream.name for stream in streams])
+                self.user_discovery_logger.info(f"Discovered streams ({len(streams)}): {stream_list}")
+            else:
+                preview = "\n\t- " + "\n\t- ".join([stream.name for stream in streams[:10]])
+                self.user_discovery_logger.info(f"Discovered streams ({len(streams)}, showing first 10): {preview}\n\t...")
         else:
             self.user_discovery_logger.error("No streams discovered, please check your configurations.")
 
@@ -469,6 +461,7 @@ class TapMongoDB(Tap):
         if other_streams and not log_based_streams:
             self._fast_forward_change_stream_position()
 
+        failed_streams: list[str] = []
         for stream in other_streams:
             if not stream.selected and not stream.has_selected_descendents:
                 self.logger.info("Skipping deselected stream '%s'.", stream.name)
@@ -482,8 +475,16 @@ class TapMongoDB(Tap):
                 )
                 continue
 
-            stream.sync()
-            stream.finalize_state_progress_markers()
+            try:
+                stream.sync()
+                stream.finalize_state_progress_markers()
+            except Exception:
+                self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
+                failed_streams.append(stream.name)
+
+        if failed_streams:
+            self.user_logger.error(f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}")
+            sys.exit(1)
 
         # this second loop is needed for all streams to print out their costs
         # including child streams which are otherwise skipped in the loop above
