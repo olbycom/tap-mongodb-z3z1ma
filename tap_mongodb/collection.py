@@ -77,15 +77,17 @@ class CollectionStream(Stream):
             sys.exit(1)
 
     def get_records(self, context: dict | None) -> Iterable[dict]:
+        cursor_timeout = self.config.get("cursor_timeout")
+        no_timeout = cursor_timeout == 0
         bookmark = self._get_mongo_compatible_replication_key(context, self._collection)
         if bookmark:
             self._collection.create_index(self.replication_key)
             cursor = self._collection.find(
                 {self.replication_key: {"$gt": bookmark}},
-                no_cursor_timeout=True,
+                no_cursor_timeout=no_timeout,
             ).sort(self.replication_key, -1)
         else:
-            cursor = self._collection.find(no_cursor_timeout=True)
+            cursor = self._collection.find(no_cursor_timeout=no_timeout)
 
         batch_size = self.config.get("batch_size")
         if batch_size and batch_size > 0:
