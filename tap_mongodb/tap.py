@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,6 +93,17 @@ class TapMongoDB(Tap):
             "batch_size",
             th.IntegerType,
             description="The number of documents to fetch in a single batch.",
+        ),
+        th.Property(
+            "cursor_timeout",
+            th.IntegerType,
+            description="Server-side cursor timeout in minutes. Set to 0 to disable timeout (prevents CursorNotFound errors on long-running syncs). 0 is not supported on Atlas free/shared tiers. Defaults to MongoDB's server default (10 minutes) when not set.",
+        ),
+        th.Property(
+            "max_parallel_streams",
+            th.IntegerType,
+            description="The number of streams to sync in parallel. Defaults to 1 (sequential).",
+            default=1,
         ),
         th.Property("stream_maps", th.ObjectType()),
         th.Property("stream_map_config", th.ObjectType()),
@@ -426,6 +439,50 @@ class TapMongoDB(Tap):
             self.internal_logger.warning(f"Could not capture change stream position: {e}")
             # Non-fatal - continue with the sync
 
+    def _install_threadsafe_write(self) -> None:
+        """Wrap sys.stdout.write + flush in a lock for thread-safe Singer messages."""
+        if hasattr(self, "_stdout_lock"):
+            return
+        self._stdout_lock = threading.Lock()
+        _original_write = sys.stdout.write
+        _original_flush = sys.stdout.flush
+
+        def locked_write(msg: str) -> int:
+            with self._stdout_lock:
+                result = _original_write(msg)
+                _original_flush()
+                return result
+
+        def locked_flush() -> None:
+            with self._stdout_lock:
+                _original_flush()
+
+        sys.stdout.write = locked_write  # type: ignore[assignment]
+        sys.stdout.flush = locked_flush  # type: ignore[assignment]
+
+    def _sync_streams_parallel(self, streams: list, max_parallel: int) -> list[str]:
+        """Sync streams using a thread pool."""
+        self._install_threadsafe_write()
+        failed_streams: list[str] = []
+        failed_lock = threading.Lock()
+
+        def sync_one(stream):
+            try:
+                stream.sync()
+                stream.finalize_state_progress_markers()
+            except Exception:
+                self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
+                with failed_lock:
+                    failed_streams.append(stream.name)
+
+        self.user_logger.info(f"Syncing {len(streams)} streams with max_parallel_streams={max_parallel}")
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            futures = [executor.submit(sync_one, stream) for stream in streams]
+            for future in as_completed(futures):
+                future.result()  # surfaces unexpected exceptions
+
+        return failed_streams
+
     def sync_all(self) -> None:
         """Sync all streams."""
         self._reset_state_progress_markers()
@@ -461,7 +518,7 @@ class TapMongoDB(Tap):
         if other_streams and not log_based_streams:
             self._fast_forward_change_stream_position()
 
-        failed_streams: list[str] = []
+        streams_to_sync = []
         for stream in other_streams:
             if not stream.selected and not stream.has_selected_descendents:
                 self.logger.info("Skipping deselected stream '%s'.", stream.name)
@@ -475,12 +532,21 @@ class TapMongoDB(Tap):
                 )
                 continue
 
-            try:
-                stream.sync()
-                stream.finalize_state_progress_markers()
-            except Exception:
-                self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
-                failed_streams.append(stream.name)
+            streams_to_sync.append(stream)
+
+        max_parallel = self.config.get("max_parallel_streams", 1)
+        failed_streams: list[str] = []
+
+        if max_parallel > 1 and len(streams_to_sync) > 1:
+            failed_streams = self._sync_streams_parallel(streams_to_sync, max_parallel)
+        else:
+            for stream in streams_to_sync:
+                try:
+                    stream.sync()
+                    stream.finalize_state_progress_markers()
+                except Exception:
+                    self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
+                    failed_streams.append(stream.name)
 
         if failed_streams:
             self.user_logger.error(f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}")
