@@ -80,25 +80,31 @@ class CollectionStream(Stream):
         bookmark = self._get_mongo_compatible_replication_key(context, self._collection)
         if bookmark:
             self._collection.create_index(self.replication_key)
-            cursor = self._collection.find({self.replication_key: {"$gt": bookmark}}).sort(self.replication_key, -1)
+            cursor = self._collection.find(
+                {self.replication_key: {"$gt": bookmark}},
+                no_cursor_timeout=True,
+            ).sort(self.replication_key, -1)
         else:
-            cursor = self._collection.find()
+            cursor = self._collection.find(no_cursor_timeout=True)
 
         batch_size = self.config.get("batch_size")
         if batch_size and batch_size > 0:
             cursor = cursor.batch_size(batch_size)
 
-        for record in cursor:
-            processed_record = {
-                "_id": record["_id"],
-                "document": json.dumps(record, default=self._handle_unusual_types),
-            }
-            if self.replication_key and self.replication_key != "_id":
-                processed_record[self.replication_key] = self._process_replication_key_value(
-                    record[self.replication_key]
-                )
-            transformed_record = self.post_process(processed_record, context)
-            yield transformed_record
+        try:
+            for record in cursor:
+                processed_record = {
+                    "_id": record["_id"],
+                    "document": json.dumps(record, default=self._handle_unusual_types),
+                }
+                if self.replication_key and self.replication_key != "_id":
+                    processed_record[self.replication_key] = self._process_replication_key_value(
+                        record[self.replication_key]
+                    )
+                transformed_record = self.post_process(processed_record, context)
+                yield transformed_record
+        finally:
+            cursor.close()
 
     def _handle_unusual_types(self, obj):
         if isinstance(obj, datetime.datetime):
