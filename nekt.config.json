@@ -51,6 +51,24 @@
             "placeholder": 1000,
             "advanced_settings": true
           },
+          "cursor_timeout": {
+            "type": "integer",
+            "order": 4,
+            "title": "Cursor timeout (minutes)",
+            "el_type": "extractor",
+            "description": "Server-side cursor timeout in minutes. Set to 0 to disable timeout, which prevents CursorNotFound errors on long-running syncs. Note: 0 is not supported on Atlas free/shared tiers. When not set, uses MongoDB's server default (10 minutes).",
+            "placeholder": 0,
+            "advanced_settings": true
+          },
+          "max_parallel_streams": {
+            "type": "integer",
+            "order": 5,
+            "title": "Max parallel streams",
+            "el_type": "extractor",
+            "description": "The number of streams to sync in parallel. Defaults to 1 (sequential). Increasing this value can significantly reduce total extraction time for pipelines with many collections.",
+            "placeholder": 1,
+            "advanced_settings": true
+          },
           "max_size": {
             "type": "integer",
             "title": "Max batch size for parquet files",

@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/bin/python3:*)"
+      "Bash(.venv/bin/python3:*)",
+      "Bash(.venv/bin/python -c \"from tap_mongodb.tap import TapMongoDB; print\\('OK'\\)\" 2>&1)",
+      "Bash(.venv/bin/python tap_mongodb/tap.py --config .secrets/config.json)",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(.venv/bin/python tap_mongodb/tap.py --config .secrets/config.json --discover)"
     ]
   }
 }
