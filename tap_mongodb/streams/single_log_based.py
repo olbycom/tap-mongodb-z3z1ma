@@ -334,8 +334,7 @@ class MongoDBSingleLogBasedStream(Stream):
                 f"LOG_BASED replication requires changeStreamPreAndPostImages "
                 f"to be enabled on the source collection; otherwise SCD2 "
                 f"history would be silently incorrect. Enable it with:\n"
-                f"  use {db_name}\n"
-                f"  db.runCommand({{collMod: '{coll_name}', "
+                f'  db.getSiblingDB("{db_name}").runCommand({{collMod: "{coll_name}", '
                 f"changeStreamPreAndPostImages: {{enabled: true}}}})\n"
                 f"Then retry the pipeline."
             )

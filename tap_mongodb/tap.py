@@ -554,22 +554,27 @@ class TapMongoDB(Tap):
                         f"the collection. LOG_BASED replication cannot faithfully "
                         f"represent history (SCD2) without it. Enable on the "
                         f"source MongoDB with:\n"
-                        f"  use {db_name}\n"
-                        f"  db.runCommand({{collMod: '{table}', "
+                        f'  db.getSiblingDB("{db_name}").runCommand({{collMod: "{table}", '
                         f"changeStreamPreAndPostImages: {{enabled: true}}}})"
                     )
 
         if missing_refs:
-            preview = "\n\t- " + "\n\t- ".join(missing_refs[:20])
-            more = f"\n\t... (+{len(missing_refs) - 20} more)" if len(missing_refs) > 20 else ""
+            # Emit every affected collection — no truncation. Operators need
+            # the complete list to fix everything in a single pass; otherwise
+            # the next pipeline run would surface the same problem again for
+            # collections that were hidden behind a "... N more" placeholder.
+            commands = "\n".join(
+                f'  db.getSiblingDB("{ref.split(".", 1)[0]}").runCommand('
+                f'{{collMod: "{ref.split(".", 1)[1]}", '
+                f"changeStreamPreAndPostImages: {{enabled: true}}}})"
+                for ref in missing_refs
+            )
             self.user_logger.error(
                 f"LOG_BASED PRE-FLIGHT SUMMARY: {len(missing_refs)} collection(s) "
                 f"skipped because changeStreamPreAndPostImages is not enabled. "
-                f"Enable on each (replace <coll> with the collection name, and "
-                f"switch to its database first):\n"
-                f"  db.runCommand({{collMod: '<coll>', "
-                f"changeStreamPreAndPostImages: {{enabled: true}}}})\n"
-                f"Affected collections:{preview}{more}\n"
+                f"Run each of the following commands on the source MongoDB "
+                f"(copy-paste ready, targets the correct database explicitly):\n"
+                f"{commands}\n"
                 f"After enabling, re-run the pipeline. Until then, these streams "
                 f"will not be replicated."
             )
