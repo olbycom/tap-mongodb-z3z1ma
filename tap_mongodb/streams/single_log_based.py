@@ -146,7 +146,9 @@ class MongoDBSingleLogBasedStream(Stream):
             # We'll open a change stream briefly to get the current token
             for db_name, collection_name in self._get_watched_collections():
                 collection = self.mongo_client[db_name][collection_name]
-                with collection.watch(full_document="updateLookup") as stream:
+                with collection.watch(
+                    full_document=self.config.get("cdc_image_mode", "whenAvailable")
+                ) as stream:
                     # Get the current resume token without waiting for changes
                     latest_token = stream.resume_token
                     if latest_token:
@@ -299,7 +301,7 @@ class MongoDBSingleLogBasedStream(Stream):
 
         kwargs = {
             "pipeline": pipeline,
-            "full_document": "updateLookup",
+            "full_document": self.config.get("cdc_image_mode", "whenAvailable"),
             # max_await_time_ms: Maximum time in milliseconds for the server to wait
             # for new changes before returning an empty batch. This prevents the
             # change stream from blocking indefinitely. 1000ms = 1 second.
@@ -312,13 +314,40 @@ class MongoDBSingleLogBasedStream(Stream):
         # Watch at the client level to capture all databases
         return self.mongo_client.watch(**kwargs)
 
+    def _require_full_document(self, change: dict, operation: str) -> dict:
+        """Return change["fullDocument"] or raise with fix instructions if missing.
+
+        Safety net for a collection having changeStreamPreAndPostImages disabled
+        mid-sync (the pre-flight in tap.sync_all should prevent it otherwise).
+        Emitting a record without a faithful post-image would silently corrupt
+        SCD2 history, so we fail loudly instead.
+        """
+        document = change.get("fullDocument")
+        if document is None:
+            ns = change.get("ns", {})
+            db_name = ns.get("db", "<unknown>")
+            coll_name = ns.get("coll", "<unknown>")
+            doc_key = change.get("documentKey", {})
+            raise RuntimeError(
+                f"{operation} event for {db_name}.{coll_name} "
+                f"(documentKey={doc_key}) arrived with no fullDocument. "
+                f"LOG_BASED replication requires changeStreamPreAndPostImages "
+                f"to be enabled on the source collection; otherwise SCD2 "
+                f"history would be silently incorrect. Enable it with:\n"
+                f"  use {db_name}\n"
+                f"  db.runCommand({{collMod: '{coll_name}', "
+                f"changeStreamPreAndPostImages: {{enabled: true}}}})\n"
+                f"Then retry the pipeline."
+            )
+        return document
+
     def handle_insert(
         self,
         change: dict,
         stream_name: str,
     ) -> dict[str, Any]:
         """Handle insert operation from change stream."""
-        document = change["fullDocument"]
+        document = self._require_full_document(change, "insert")
         resume_token = change["_id"]
         cluster_time = change.get("clusterTime")
 
@@ -352,7 +381,7 @@ class MongoDBSingleLogBasedStream(Stream):
         stream_name: str,
     ) -> dict[str, Any]:
         """Handle update operation from change stream."""
-        document = change["fullDocument"]
+        document = self._require_full_document(change, "update")
         resume_token = change["_id"]
         cluster_time = change.get("clusterTime")
 

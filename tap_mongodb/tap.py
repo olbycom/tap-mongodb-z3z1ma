@@ -100,6 +100,28 @@ class TapMongoDB(Tap):
             description="Server-side cursor timeout in minutes. Set to 0 to disable timeout (prevents CursorNotFound errors on long-running syncs). 0 is not supported on Atlas free/shared tiers. Defaults to MongoDB's server default (10 minutes) when not set.",
         ),
         th.Property(
+            "cdc_image_mode",
+            th.StringType,
+            description=(
+                "LOG_BASED (CDC) replication requires changeStreamPreAndPostImages to "
+                "be enabled on every source collection — without it, update events "
+                "silently misattribute state and SCD2 history is incorrect. Enable on "
+                "each collection with: "
+                "db.runCommand({collMod: '<coll>', changeStreamPreAndPostImages: {enabled: true}}). "
+                "This setting only controls WHERE enforcement happens; the pre-flight "
+                "audit always skips misconfigured streams and fails the run. "
+                "'whenAvailable' (default, migration-friendly): MongoDB returns the "
+                "post-image when the collection has it enabled, and null otherwise; "
+                "the tap crashes loudly on null. Correctly-configured streams still "
+                "sync while misconfigured ones are skipped. "
+                "'required': MongoDB itself refuses to open the change stream if any "
+                "watched collection is not configured. Use once every source collection "
+                "is confirmed set up."
+            ),
+            default="whenAvailable",
+            allowed_values=["whenAvailable", "required"],
+        ),
+        th.Property(
             "max_parallel_streams",
             th.IntegerType,
             description="The number of streams to sync in parallel. Defaults to 1 (sequential).",
@@ -483,6 +505,77 @@ class TapMongoDB(Tap):
 
         return failed_streams
 
+    def _partition_log_based_by_image_support(
+        self,
+        log_based_streams: list,
+    ) -> tuple[list, list[str]]:
+        """Split LOG_BASED streams by whether their collection has
+        changeStreamPreAndPostImages enabled. Ineligible streams are excluded
+        from the log-based sync — LOG_BASED replication without pre-/post-images
+        silently misattributes state to earlier events, breaking SCD2.
+
+        Returns (eligible_streams, skipped_stream_names).
+
+        One listCollections call per distinct database, not per collection.
+        """
+        by_db: dict[str, dict[str, Any]] = {}
+        for s in log_based_streams:
+            by_db.setdefault(s.database, {})[s.table] = s
+
+        eligible: list = []
+        skipped_names: list[str] = []
+        missing_refs: list[str] = []
+
+        for db_name, table_to_stream in by_db.items():
+            enabled_tables: set[str] = set()
+            try:
+                for col in self.mongo_client[db_name].list_collections(
+                    filter={"name": {"$in": list(table_to_stream.keys())}}
+                ):
+                    opt = (col.get("options") or {}).get("changeStreamPreAndPostImages", {})
+                    if opt.get("enabled") is True:
+                        enabled_tables.add(col["name"])
+            except Exception as e:
+                self.internal_logger.warning(
+                    f"Could not inspect collection options for '{db_name}': {e}. "
+                    f"Treating all LOG_BASED streams in this database as ineligible."
+                )
+
+            for table, stream in table_to_stream.items():
+                if table in enabled_tables:
+                    eligible.append(stream)
+                else:
+                    ref = f"{db_name}.{table}"
+                    missing_refs.append(ref)
+                    skipped_names.append(stream.name)
+                    self.user_logger.error(
+                        f"Stream '{stream.name}' ({ref}) SKIPPED from LOG_BASED "
+                        f"sync: changeStreamPreAndPostImages is not enabled on "
+                        f"the collection. LOG_BASED replication cannot faithfully "
+                        f"represent history (SCD2) without it. Enable on the "
+                        f"source MongoDB with:\n"
+                        f"  use {db_name}\n"
+                        f"  db.runCommand({{collMod: '{table}', "
+                        f"changeStreamPreAndPostImages: {{enabled: true}}}})"
+                    )
+
+        if missing_refs:
+            preview = "\n\t- " + "\n\t- ".join(missing_refs[:20])
+            more = f"\n\t... (+{len(missing_refs) - 20} more)" if len(missing_refs) > 20 else ""
+            self.user_logger.error(
+                f"LOG_BASED PRE-FLIGHT SUMMARY: {len(missing_refs)} collection(s) "
+                f"skipped because changeStreamPreAndPostImages is not enabled. "
+                f"Enable on each (replace <coll> with the collection name, and "
+                f"switch to its database first):\n"
+                f"  db.runCommand({{collMod: '<coll>', "
+                f"changeStreamPreAndPostImages: {{enabled: true}}}})\n"
+                f"Affected collections:{preview}{more}\n"
+                f"After enabling, re-run the pipeline. Until then, these streams "
+                f"will not be replicated."
+            )
+
+        return eligible, skipped_names
+
     def sync_all(self) -> None:
         """Sync all streams."""
         self._reset_state_progress_markers()
@@ -500,6 +593,12 @@ class TapMongoDB(Tap):
         other_streams = [
             stream for stream in self.streams.values() if stream.replication_method != "LOG_BASED" and stream.selected
         ]
+
+        skipped_log_based: list[str] = []
+        if log_based_streams:
+            log_based_streams, skipped_log_based = self._partition_log_based_by_image_support(
+                log_based_streams
+            )
 
         if log_based_streams:
             log_based_stream = MongoDBSingleLogBasedStream(
@@ -548,8 +647,17 @@ class TapMongoDB(Tap):
                     self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
                     failed_streams.append(stream.name)
 
-        if failed_streams:
-            self.user_logger.error(f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}")
+        if failed_streams or skipped_log_based:
+            if skipped_log_based:
+                self.user_logger.error(
+                    f"{len(skipped_log_based)} LOG_BASED stream(s) skipped due to "
+                    f"missing changeStreamPreAndPostImages (see pre-flight summary "
+                    f"above): {', '.join(skipped_log_based)}"
+                )
+            if failed_streams:
+                self.user_logger.error(
+                    f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}"
+                )
             sys.exit(1)
 
         # this second loop is needed for all streams to print out their costs

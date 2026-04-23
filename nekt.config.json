@@ -69,6 +69,16 @@
             "placeholder": 1,
             "advanced_settings": true
           },
+          "cdc_image_mode": {
+            "type": "string",
+            "order": 6,
+            "title": "CDC post-image handling (Log Based)",
+            "el_type": "extractor",
+            "enum": ["whenAvailable", "required"],
+            "default": "whenAvailable",
+            "description": "LOG_BASED (CDC) replication requires changeStreamPreAndPostImages to be enabled on every source collection. Without it, update events silently misattribute state (events end up carrying the document's 'current' state rather than the state at the time of the event), making SCD Type 2 / audit histories incorrect. Enable per collection with: db.runCommand({collMod: '<coll>', changeStreamPreAndPostImages: {enabled: true}}). This setting does not decide whether pre-/post-images are required (they always are) — it only controls where enforcement happens. 'whenAvailable' (default, migration-friendly): correctly-configured streams sync; misconfigured ones are skipped with a clear per-stream error and a consolidated summary. 'required': MongoDB itself refuses to open the change stream if any watched collection is not configured — use once every collection is confirmed set up, so the pipeline fails fast at startup if someone later disables the feature.",
+            "advanced_settings": true
+          },
           "max_size": {
             "type": "integer",
             "title": "Max batch size for parquet files",
