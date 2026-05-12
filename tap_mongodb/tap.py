@@ -310,11 +310,15 @@ class TapMongoDB(Tap):
             # If incremental stream
             if stream.replication_method == "INCREMENTAL" and stream.schema.properties:
                 if stream.replication_key not in stream.schema.properties:
-                    # Add replication key to schema if missing
+                    # Add replication key to schema if missing. The discovered entry
+                    # may not carry the property when no sample document was available
+                    # (empty collection or replication key missing on every document).
                     entry = self.mongo_catalog_entries[stream.tap_stream_id]
-                    modified = True
-                    stream.schema.properties.update({stream.replication_key: Schema(**entry.get("schema").get("properties").get(stream.replication_key))})
-                    stream.metadata.update({("properties", stream.replication_key): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
+                    discovered_property = entry.get("schema").get("properties").get(stream.replication_key)
+                    if discovered_property is not None:
+                        modified = True
+                        stream.schema.properties.update({stream.replication_key: Schema(**discovered_property)})
+                        stream.metadata.update({("properties", stream.replication_key): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
 
             # If LOG_BASED, apply nullability and _sdc column logic
             if stream.replication_method == "LOG_BASED" and stream.schema.properties:
@@ -597,6 +601,9 @@ class TapMongoDB(Tap):
                     type(stream).__name__,
                     stream.parent_stream_type.__name__,
                 )
+                continue
+
+            if stream.name in self._streams_missing_replication_key or stream.name in self._streams_with_no_records:
                 continue
 
             streams_to_sync.append(stream)
