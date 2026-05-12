@@ -136,6 +136,7 @@ class TapMongoDB(Tap):
         self._catalog_dict: dict[str, list[dict]] | None = None
         self._streams_missing_replication_key: list[str] = []
         self._streams_with_no_records: list[str] = []
+        self._streams_with_records_missing_replication_key: set[str] = set()
         super().__init__(*args, **kwargs)
 
     def get_mongo_config(self) -> dict[str, Any]:
@@ -469,7 +470,8 @@ class TapMongoDB(Tap):
                 stream.sync()
                 stream.finalize_state_progress_markers()
             except Exception as e:
-                self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
+                self.internal_logger.exception(f"Stream '{stream.name}' failed during sync.")
+                self.user_logger.error(f"Stream '{stream.name}' failed during extraction: {e}. Continuing with the remaining streams.")
                 with failed_lock:
                     failed_streams.append((stream.name, f"{type(e).__name__}: {e}"))
 
@@ -619,7 +621,8 @@ class TapMongoDB(Tap):
                     stream.sync()
                     stream.finalize_state_progress_markers()
                 except Exception as e:
-                    self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
+                    self.internal_logger.exception(f"Stream '{stream.name}' failed during sync.")
+                    self.user_logger.error(f"Stream '{stream.name}' failed during extraction: {e}. Continuing with the remaining streams.")
                     failed_streams.append((stream.name, f"{type(e).__name__}: {e}"))
 
         # this second loop is needed for all streams to print out their costs
@@ -643,10 +646,17 @@ class TapMongoDB(Tap):
                 f"{len(self._streams_with_no_records)} stream(s) had no records in the source collection: "
                 f"{', '.join(self._streams_with_no_records)}"
             )
+        if self._streams_with_records_missing_replication_key:
+            names = sorted(self._streams_with_records_missing_replication_key)
+            self.user_logger.warning(
+                f"{len(names)} stream(s) had documents missing the configured replication key; "
+                f"those documents were extracted but did not advance the incremental bookmark: "
+                f"{', '.join(names)}"
+            )
         if failed_streams:
             failure_details = "\n".join(f"\t- {name}: {reason}" for name, reason in failed_streams)
             self.user_logger.error(
-                f"{len(failed_streams)} stream(s) failed during sync:\n{failure_details}"
+                f"{len(failed_streams)} stream(s) failed during extraction:\n{failure_details}"
             )
 
         # Only fail the pipeline if every attempted stream failed. Streams skipped

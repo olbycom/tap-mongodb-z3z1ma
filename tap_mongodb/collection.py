@@ -14,7 +14,7 @@ from bson.datetime_ms import DatetimeMS
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
 from nekt_singer_sdk import Stream
-from nekt_singer_sdk.custom_logger import user_logger
+from nekt_singer_sdk.custom_logger import internal_logger, user_logger
 from nekt_singer_sdk.helpers._state import increment_state
 from nekt_singer_sdk.helpers._util import utc_now
 from nekt_singer_sdk.plugin_base import PluginBase as TapBaseClass
@@ -49,6 +49,7 @@ class CollectionStream(Stream):
         """Initialize the stream."""
         super().__init__(tap=tap, schema=schema, name=name)
         self._collection = collection
+        self._tap = tap
 
     @cached_property
     def replication_key_mongo_type(self) -> str:
@@ -187,13 +188,23 @@ class CollectionStream(Stream):
                         is_sorted=treat_as_sorted,
                         check_sorted=self.check_sorted,
                     )
-                except Exception as e:
-                    # Handle the case where the replication key is not in the latest record
-                    # since this is a valid case for Mongo
-                    if self.config.get("optional_replication_key", False):
-                        self.logger.warn("Failed to increment state. Ignoring...")
-                        return
-                    raise RuntimeError("Failed to increment state. Got record %s", latest_record) from e
+                except KeyError:
+                    # Mongo has a flexible schema: not every document carries the
+                    # replication key. Skip the state increment for these records
+                    # (the document itself is still emitted) and remember the stream
+                    # so we can surface a single summary message at the end of the run.
+                    internal_logger.debug(
+                        f"Stream '{self.name}': record missing replication key '{self.replication_key}', skipping state increment."
+                    )
+                    tap = getattr(self, "_tap", None)
+                    if tap is not None:
+                        getattr(tap, "_streams_with_records_missing_replication_key", set()).add(self.name)
+                    return
+                except Exception:
+                    internal_logger.exception(
+                        f"Stream '{self.name}': failed to increment state for record with _id={latest_record.get('_id')!r}"
+                    )
+                    raise
 
 
 class MockCollection:
