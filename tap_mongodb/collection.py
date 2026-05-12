@@ -79,7 +79,6 @@ class CollectionStream(Stream):
         no_timeout = cursor_timeout == 0
         bookmark = self._get_mongo_compatible_replication_key(context, self._collection)
         if bookmark:
-            self._collection.create_index(self.replication_key)
             cursor = self._collection.find(
                 {self.replication_key: {"$gt": bookmark}},
                 no_cursor_timeout=no_timeout,
@@ -98,7 +97,9 @@ class CollectionStream(Stream):
                     "document": json.dumps(record, default=self._handle_unusual_types),
                 }
                 if self.replication_key and self.replication_key != "_id":
-                    processed_record[self.replication_key] = self._process_replication_key_value(record[self.replication_key])
+                    replication_value = record.get(self.replication_key)
+                    if replication_value is not None:
+                        processed_record[self.replication_key] = self._process_replication_key_value(replication_value)
                 transformed_record = self.post_process(processed_record, context)
                 yield transformed_record
         finally:

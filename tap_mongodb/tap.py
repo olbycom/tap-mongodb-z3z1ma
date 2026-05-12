@@ -458,20 +458,20 @@ class TapMongoDB(Tap):
         sys.stdout.write = locked_write  # type: ignore[assignment]
         sys.stdout.flush = locked_flush  # type: ignore[assignment]
 
-    def _sync_streams_parallel(self, streams: list, max_parallel: int) -> list[str]:
+    def _sync_streams_parallel(self, streams: list, max_parallel: int) -> list[tuple[str, str]]:
         """Sync streams using a thread pool."""
         self._install_threadsafe_write()
-        failed_streams: list[str] = []
+        failed_streams: list[tuple[str, str]] = []
         failed_lock = threading.Lock()
 
         def sync_one(stream):
             try:
                 stream.sync()
                 stream.finalize_state_progress_markers()
-            except Exception:
+            except Exception as e:
                 self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
                 with failed_lock:
-                    failed_streams.append(stream.name)
+                    failed_streams.append((stream.name, f"{type(e).__name__}: {e}"))
 
         self.user_logger.info(f"Syncing {len(streams)} streams with max_parallel_streams={max_parallel}")
         with ThreadPoolExecutor(max_workers=max_parallel) as executor:
@@ -609,7 +609,7 @@ class TapMongoDB(Tap):
             streams_to_sync.append(stream)
 
         max_parallel = self.config.get("max_parallel_streams", 1)
-        failed_streams: list[str] = []
+        failed_streams: list[tuple[str, str]] = []
 
         if max_parallel > 1 and len(streams_to_sync) > 1:
             failed_streams = self._sync_streams_parallel(streams_to_sync, max_parallel)
@@ -618,26 +618,21 @@ class TapMongoDB(Tap):
                 try:
                     stream.sync()
                     stream.finalize_state_progress_markers()
-                except Exception:
+                except Exception as e:
                     self.user_logger.exception(f"Stream '{stream.name}' failed, continuing with remaining streams.")
-                    failed_streams.append(stream.name)
-
-        if failed_streams or skipped_log_based:
-            if skipped_log_based:
-                self.user_logger.error(
-                    f"{len(skipped_log_based)} LOG_BASED stream(s) skipped due to "
-                    f"missing changeStreamPreAndPostImages (see pre-flight summary "
-                    f"above): {', '.join(skipped_log_based)}"
-                )
-            if failed_streams:
-                self.user_logger.error(f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}")
-            sys.exit(1)
+                    failed_streams.append((stream.name, f"{type(e).__name__}: {e}"))
 
         # this second loop is needed for all streams to print out their costs
         # including child streams which are otherwise skipped in the loop above
         for stream in self.streams.values():
             stream.log_sync_costs()
 
+        if skipped_log_based:
+            self.user_logger.error(
+                f"{len(skipped_log_based)} LOG_BASED stream(s) skipped due to "
+                f"missing changeStreamPreAndPostImages (see pre-flight summary "
+                f"above): {', '.join(skipped_log_based)}"
+            )
         if self._streams_missing_replication_key:
             self.user_logger.error(
                 f"{len(self._streams_missing_replication_key)} stream(s) had no documents containing the configured replication key: "
@@ -648,6 +643,17 @@ class TapMongoDB(Tap):
                 f"{len(self._streams_with_no_records)} stream(s) had no records in the source collection: "
                 f"{', '.join(self._streams_with_no_records)}"
             )
+        if failed_streams:
+            failure_details = "\n".join(f"\t- {name}: {reason}" for name, reason in failed_streams)
+            self.user_logger.error(
+                f"{len(failed_streams)} stream(s) failed during sync:\n{failure_details}"
+            )
+
+        # Only fail the pipeline if every attempted stream failed. Streams skipped
+        # for missing replication key, empty collections, or missing pre/post images
+        # are reported above but do not, on their own, fail the run.
+        if streams_to_sync and len(failed_streams) == len(streams_to_sync):
+            sys.exit(1)
 
     def get_replication_key_schema_type(self, sample_document: dict | None, stream_name: str, replication_key: str) -> th.AnyType | None:
         if sample_document:
