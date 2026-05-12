@@ -82,12 +82,12 @@ class TapMongoDB(Tap):
         th.Property(
             "database_includes",
             th.ArrayType(th.StringType),
-            description=("A list of databases to include. If this list is empty, all databases" " will be included."),
+            description=("A list of databases to include. If this list is empty, all databases will be included."),
         ),
         th.Property(
             "database_excludes",
             th.ArrayType(th.StringType),
-            description=("A list of databases to exclude. If this list is empty, no databases" " will be excluded."),
+            description=("A list of databases to exclude. If this list is empty, no databases will be excluded."),
         ),
         th.Property(
             "batch_size",
@@ -134,6 +134,8 @@ class TapMongoDB(Tap):
 
     def __init__(self, *args, **kwargs):
         self._catalog_dict: dict[str, list[dict]] | None = None
+        self._streams_missing_replication_key: list[str] = []
+        self._streams_with_no_records: list[str] = []
         super().__init__(*args, **kwargs)
 
     def get_mongo_config(self) -> dict[str, Any]:
@@ -165,7 +167,6 @@ class TapMongoDB(Tap):
         self,
         # tap_metadata: dict,
     ) -> list[CatalogEntry]:
-
         db_includes = self.config.get("database_includes", [])
         db_excludes = self.config.get("database_excludes", [])
 
@@ -181,29 +182,21 @@ class TapMongoDB(Tap):
 
         for db_name in databases:
             if db_includes and db_name not in db_includes:
-                self.user_discovery_logger.info(
-                    f"Skipping database '{db_name}' (database not in database_includes config)."
-                )
+                self.user_discovery_logger.info(f"Skipping database '{db_name}' (database not in database_includes config).")
                 continue
             if db_excludes and db_name in db_excludes:
-                self.user_discovery_logger.info(
-                    f"Skipping database '{db_name}' (database in database_excludes config)."
-                )
+                self.user_discovery_logger.info(f"Skipping database '{db_name}' (database in database_excludes config).")
                 continue
             try:
                 self.user_discovery_logger.info(f"Discovering collections for database '{db_name}'...")
                 collections = self.mongo_client[db_name].list_collection_names()
             except Exception:
-                self.user_discovery_logger.warning(
-                    f"Skipping database '{db_name}', authenticated user does not have permission to access."
-                )
+                self.user_discovery_logger.warning(f"Skipping database '{db_name}', authenticated user does not have permission to access.")
                 continue
 
             if collections:
                 collection_list = "\n\t- " + "\n\t- ".join(collections)
-                self.user_discovery_logger.info(
-                    f"Discovered {len(collections)} collections for database '{db_name}': {collection_list}"
-                )
+                self.user_discovery_logger.info(f"Discovered {len(collections)} collections for database '{db_name}': {collection_list}")
             else:
                 self.user_discovery_logger.warning(f"No collections discovered for database '{db_name}'.")
                 continue
@@ -229,12 +222,22 @@ class TapMongoDB(Tap):
                     # For LOG_BASED replication with _sdc_lsn, skip replication key lookup since
                     # _sdc_lsn is a synthetic column added by the CDC process, not a document field
                     if replication_key and replication_key != "_id" and replication_key != "_sdc_lsn":
-                        replication_key_type = self.get_replication_key_schema_type(
-                            self.mongo_client[db_name][collection].find_one({replication_key: {"$ne": None}}),
-                            stream_name,
-                            replication_key,
-                        )
-                        schema.append(th.Property(replication_key, replication_key_type))
+                        collection_obj = self.mongo_client[db_name][collection]
+                        sample_document = collection_obj.find_one({replication_key: {"$ne": None}})
+                        if sample_document is None:
+                            # Distinguish empty collection from one whose docs lack the key
+                            if collection_obj.find_one({}) is None:
+                                self._streams_with_no_records.append(stream_name)
+                            else:
+                                self._streams_missing_replication_key.append(stream_name)
+                        else:
+                            replication_key_type = self.get_replication_key_schema_type(
+                                sample_document,
+                                stream_name,
+                                replication_key,
+                            )
+                            if replication_key_type is not None:
+                                schema.append(th.Property(replication_key, replication_key_type))
                 except Exception:
                     pass
 
@@ -268,9 +271,7 @@ class TapMongoDB(Tap):
         """Get the MongoDB client."""
         if not hasattr(self, "_mongo_catalog_entries"):
             catalog_entries = self.discover_collections()
-            self._mongo_catalog_entries = {
-                catalog_entry["tap_stream_id"]: catalog_entry for catalog_entry in catalog_entries
-            }
+            self._mongo_catalog_entries = {catalog_entry["tap_stream_id"]: catalog_entry for catalog_entry in catalog_entries}
         return self._mongo_catalog_entries
 
     def retrieve_collection(self, catalog_entry: CatalogEntry) -> Any:
@@ -312,20 +313,8 @@ class TapMongoDB(Tap):
                     # Add replication key to schema if missing
                     entry = self.mongo_catalog_entries[stream.tap_stream_id]
                     modified = True
-                    stream.schema.properties.update(
-                        {
-                            stream.replication_key: Schema(
-                                **entry.get("schema").get("properties").get(stream.replication_key)
-                            )
-                        }
-                    )
-                    stream.metadata.update(
-                        {
-                            ("properties", stream.replication_key): Metadata(
-                                Metadata.InclusionType.AVAILABLE, True, None
-                            )
-                        }
-                    )
+                    stream.schema.properties.update({stream.replication_key: Schema(**entry.get("schema").get("properties").get(stream.replication_key))})
+                    stream.metadata.update({("properties", stream.replication_key): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
 
             # If LOG_BASED, apply nullability and _sdc column logic
             if stream.replication_method == "LOG_BASED" and stream.schema.properties:
@@ -343,44 +332,30 @@ class TapMongoDB(Tap):
                 # Add _sdc columns (aligned with tap-mysql CDC columns)
                 if "_sdc_deleted_at" not in stream.schema.properties:
                     modified = True
-                    stream.schema.properties.update(
-                        {"_sdc_deleted_at": Schema(type=["string", "null"], format="date-time")}
-                    )
-                    stream.metadata.update(
-                        {("properties", "_sdc_deleted_at"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
-                    )
+                    stream.schema.properties.update({"_sdc_deleted_at": Schema(type=["string", "null"], format="date-time")})
+                    stream.metadata.update({("properties", "_sdc_deleted_at"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
 
                 if "_sdc_operation" not in stream.schema.properties:
                     modified = True
                     stream.schema.properties.update({"_sdc_operation": Schema(type=["string", "null"])})
-                    stream.metadata.update(
-                        {("properties", "_sdc_operation"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
-                    )
+                    stream.metadata.update({("properties", "_sdc_operation"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
 
                 if "_sdc_event_timestamp" not in stream.schema.properties:
                     modified = True
-                    stream.schema.properties.update(
-                        {"_sdc_event_timestamp": Schema(type=["string", "null"], format="date-time")}
-                    )
-                    stream.metadata.update(
-                        {("properties", "_sdc_event_timestamp"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
-                    )
+                    stream.schema.properties.update({"_sdc_event_timestamp": Schema(type=["string", "null"], format="date-time")})
+                    stream.metadata.update({("properties", "_sdc_event_timestamp"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
 
                 if "_sdc_lsn" not in stream.schema.properties:
                     modified = True
                     stream.schema.properties.update({"_sdc_lsn": Schema(type=["string", "null"])})
-                    stream.metadata.update(
-                        {("properties", "_sdc_lsn"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)}
-                    )
+                    stream.metadata.update({("properties", "_sdc_lsn"): Metadata(Metadata.InclusionType.AVAILABLE, True, None)})
 
             if modified:
                 modified_count += 1
 
         if modified_count:
             self.internal_logger.info(
-                f"{modified_count} LOG_BASED catalog entries were modified "
-                "to allow nullability and include _sdc columns. "
-                "See README for further information."
+                f"{modified_count} LOG_BASED catalog entries were modified to allow nullability and include _sdc columns. See README for further information."
             )
         return base_catalog
 
@@ -452,10 +427,7 @@ class TapMongoDB(Tap):
                                 "replication_key_value": identifier,
                             }
                             self.write_message(StateMessage(value=self.state))
-                            self.user_logger.info(
-                                "Change stream position captured. "
-                                "When you switch to LOG_BASED, sync will resume from this point."
-                            )
+                            self.user_logger.info("Change stream position captured. When you switch to LOG_BASED, sync will resume from this point.")
                             return
         except Exception as e:
             self.internal_logger.warning(f"Could not capture change stream position: {e}")
@@ -529,16 +501,13 @@ class TapMongoDB(Tap):
         for db_name, table_to_stream in by_db.items():
             enabled_tables: set[str] = set()
             try:
-                for col in self.mongo_client[db_name].list_collections(
-                    filter={"name": {"$in": list(table_to_stream.keys())}}
-                ):
+                for col in self.mongo_client[db_name].list_collections(filter={"name": {"$in": list(table_to_stream.keys())}}):
                     opt = (col.get("options") or {}).get("changeStreamPreAndPostImages", {})
                     if opt.get("enabled") is True:
                         enabled_tables.add(col["name"])
             except Exception as e:
                 self.internal_logger.warning(
-                    f"Could not inspect collection options for '{db_name}': {e}. "
-                    f"Treating all LOG_BASED streams in this database as ineligible."
+                    f"Could not inspect collection options for '{db_name}': {e}. Treating all LOG_BASED streams in this database as ineligible."
                 )
 
             for table, stream in table_to_stream.items():
@@ -591,19 +560,13 @@ class TapMongoDB(Tap):
         log_based_streams = [
             stream
             for stream in self.streams.values()
-            if stream.replication_method == "LOG_BASED"
-            and stream.selected
-            and isinstance(stream, MongoDBLogBasedStream)
+            if stream.replication_method == "LOG_BASED" and stream.selected and isinstance(stream, MongoDBLogBasedStream)
         ]
-        other_streams = [
-            stream for stream in self.streams.values() if stream.replication_method != "LOG_BASED" and stream.selected
-        ]
+        other_streams = [stream for stream in self.streams.values() if stream.replication_method != "LOG_BASED" and stream.selected]
 
         skipped_log_based: list[str] = []
         if log_based_streams:
-            log_based_streams, skipped_log_based = self._partition_log_based_by_image_support(
-                log_based_streams
-            )
+            log_based_streams, skipped_log_based = self._partition_log_based_by_image_support(log_based_streams)
 
         if log_based_streams:
             log_based_stream = MongoDBSingleLogBasedStream(
@@ -660,9 +623,7 @@ class TapMongoDB(Tap):
                     f"above): {', '.join(skipped_log_based)}"
                 )
             if failed_streams:
-                self.user_logger.error(
-                    f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}"
-                )
+                self.user_logger.error(f"{len(failed_streams)} stream(s) failed during sync: {', '.join(failed_streams)}")
             sys.exit(1)
 
         # this second loop is needed for all streams to print out their costs
@@ -670,9 +631,18 @@ class TapMongoDB(Tap):
         for stream in self.streams.values():
             stream.log_sync_costs()
 
-    def get_replication_key_schema_type(
-        self, sample_document: dict | None, stream_name: str, replication_key: str
-    ) -> th.AnyType | None:
+        if self._streams_missing_replication_key:
+            self.user_logger.error(
+                f"{len(self._streams_missing_replication_key)} stream(s) had no documents containing the configured replication key: "
+                f"{', '.join(self._streams_missing_replication_key)}"
+            )
+        if self._streams_with_no_records:
+            self.user_logger.error(
+                f"{len(self._streams_with_no_records)} stream(s) had no records in the source collection: "
+                f"{', '.join(self._streams_with_no_records)}"
+            )
+
+    def get_replication_key_schema_type(self, sample_document: dict | None, stream_name: str, replication_key: str) -> th.AnyType | None:
         if sample_document:
             if isinstance(sample_document.get(replication_key), int):
                 return th.IntegerType
@@ -683,15 +653,15 @@ class TapMongoDB(Tap):
             elif isinstance(sample_document.get(replication_key), str):
                 return th.StringType
             else:
-                self.logger.error(
+                self.user_logger.error(
                     f"Invalid replication key type for stream `{stream_name}`: {type(sample_document.get(replication_key))}. Allowed types are: int32, int64, date and timestamp."
                 )
-                sys.exit(1)
+                return None
 
-        self.logger.error(
+        self.user_logger.error(
             f"Replication key not found on documents for stream `{stream_name}`. Please choose a key that exists on documents with type int32, int64, date or timestamp."
         )
-        sys.exit(1)
+        return None
 
 
 # Use this to run the tap locally

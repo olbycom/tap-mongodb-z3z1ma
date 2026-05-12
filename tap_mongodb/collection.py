@@ -14,11 +14,11 @@ from bson.datetime_ms import DatetimeMS
 from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
 from nekt_singer_sdk import Stream
+from nekt_singer_sdk.custom_logger import user_logger
 from nekt_singer_sdk.helpers._state import increment_state
 from nekt_singer_sdk.helpers._util import utc_now
 from nekt_singer_sdk.plugin_base import PluginBase as TapBaseClass
 from pymongo.collection import Collection
-from pymongo.synchronous.cursor import Cursor
 from singer_sdk.streams.core import (
     REPLICATION_INCREMENTAL,
     REPLICATION_LOG_BASED,
@@ -55,9 +55,7 @@ class CollectionStream(Stream):
         doc = self._collection.find_one({self.replication_key: {"$ne": None}})
 
         if not doc:
-            self.logger.error(
-                f"Replication key not found on documents for collection `{self.name}`. Please choose a different key and try again."
-            )
+            user_logger.error(f"Replication key not found on documents for collection `{self.name}`. Please choose a different key and try again.")
             sys.exit(1)
 
         if isinstance(doc.get(self.replication_key), int):
@@ -71,7 +69,7 @@ class CollectionStream(Stream):
         elif isinstance(doc.get(self.replication_key), ObjectId):
             return "objectid"
         else:
-            self.logger.error(
+            user_logger.error(
                 f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
             )
             sys.exit(1)
@@ -100,9 +98,7 @@ class CollectionStream(Stream):
                     "document": json.dumps(record, default=self._handle_unusual_types),
                 }
                 if self.replication_key and self.replication_key != "_id":
-                    processed_record[self.replication_key] = self._process_replication_key_value(
-                        record[self.replication_key]
-                    )
+                    processed_record[self.replication_key] = self._process_replication_key_value(record[self.replication_key])
                 transformed_record = self.post_process(processed_record, context)
                 yield transformed_record
         finally:
@@ -149,7 +145,7 @@ class CollectionStream(Stream):
         elif self.replication_key_mongo_type == "objectid":
             return ObjectId(bookmark)
         else:
-            self.logger.error(
+            user_logger.error(
                 f"Type not supported for replication key `{self.replication_key}` for collection `{self.name}`. Please choose an integer, date or timestamp field."
             )
             sys.exit(1)
@@ -177,10 +173,7 @@ class CollectionStream(Stream):
         if latest_record:
             if self.replication_method in [REPLICATION_INCREMENTAL, REPLICATION_LOG_BASED]:
                 if not self.replication_key:
-                    raise ValueError(
-                        f"Could not detect replication key for '{self.name}' stream"
-                        f"(replication method={self.replication_method})"
-                    )
+                    raise ValueError(f"Could not detect replication key for '{self.name}' stream(replication method={self.replication_method})")
                 treat_as_sorted = self.is_sorted
                 if not treat_as_sorted and self.state_partitioning_keys is not None:
                     # Streams with custom state partitioning are not resumable.
