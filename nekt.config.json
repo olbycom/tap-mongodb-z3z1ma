@@ -16,8 +16,10 @@
           "mongo": {
             "type": "object",
             "order": 1,
+            "title": "MongoDB connection",
             "format": "parent",
             "el_type": "extractor",
+            "description": "Connection settings for your MongoDB database.",
             "required": ["host"],
             "properties": {
               "host": {
